@@ -67,6 +67,7 @@ pub struct ReplacementCapture {
 }
 
 pub struct ReplacementSession {
+    target: platform::RewriteTarget,
     snapshot: platform::ClipboardSnapshot,
     metadata: CaptureMetadata,
     started_at: Instant,
@@ -89,7 +90,9 @@ impl ReplacementSession {
         let mut metadata = self.metadata;
         metadata.paste_text_char_length = Some(paste_text.chars().count());
 
-        let category = if platform::set_clipboard_plain_text(paste_text).is_err() {
+        let category = if !platform::is_foreground_target(&self.target).unwrap_or(false) {
+            Some("rewrite_target_changed")
+        } else if platform::set_clipboard_plain_text(paste_text).is_err() {
             Some("clipboard_write_failed")
         } else if platform::send_paste().is_err() {
             Some("paste_failed")
@@ -123,13 +126,16 @@ pub fn capture_selected_text_for_replacement() -> ReplacementCaptureResult {
     let started_at = Instant::now();
     let mut metadata = CaptureMetadata::new();
 
-    if platform::capture_foreground_target().is_err() {
-        return ReplacementCaptureResult::Failed(failure(
-            "rewrite_target_unavailable",
-            metadata,
-            started_at,
-        ));
-    }
+    let target = match platform::capture_foreground_target() {
+        Ok(target) => target,
+        Err(_) => {
+            return ReplacementCaptureResult::Failed(failure(
+                "rewrite_target_unavailable",
+                metadata,
+                started_at,
+            ))
+        }
+    };
     metadata.target_captured = true;
 
     let snapshot = match platform::capture_clipboard_snapshot() {
@@ -190,6 +196,7 @@ pub fn capture_selected_text_for_replacement() -> ReplacementCaptureResult {
     ReplacementCaptureResult::Captured(ReplacementCapture {
         selected_text,
         session: ReplacementSession {
+            target,
             snapshot,
             metadata,
             started_at,
@@ -295,8 +302,8 @@ mod platform {
     const VK_V: VIRTUAL_KEY = 0x56;
 
     pub(super) struct RewriteTarget {
-        _hwnd: HWND,
-        _process_id: u32,
+        hwnd: HWND,
+        process_id: u32,
     }
 
     pub(super) struct ClipboardSnapshot {
@@ -341,10 +348,21 @@ mod platform {
             let mut process_id = 0;
             GetWindowThreadProcessId(hwnd, &mut process_id);
 
-            Ok(RewriteTarget {
-                _hwnd: hwnd,
-                _process_id: process_id,
-            })
+            Ok(RewriteTarget { hwnd, process_id })
+        }
+    }
+
+    pub(super) fn is_foreground_target(target: &RewriteTarget) -> Result<bool, ()> {
+        unsafe {
+            let hwnd = GetForegroundWindow();
+            if hwnd.is_null() {
+                return Err(());
+            }
+
+            let mut process_id = 0;
+            GetWindowThreadProcessId(hwnd, &mut process_id);
+
+            Ok(hwnd == target.hwnd && process_id == target.process_id)
         }
     }
 
@@ -637,6 +655,10 @@ mod platform {
     }
 
     pub(super) fn capture_foreground_target() -> Result<RewriteTarget, ()> {
+        Err(())
+    }
+
+    pub(super) fn is_foreground_target(_target: &RewriteTarget) -> Result<bool, ()> {
         Err(())
     }
 

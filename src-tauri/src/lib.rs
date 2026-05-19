@@ -5,6 +5,7 @@ use std::{
     process::{Command, Stdio},
     sync::atomic::{AtomicBool, Ordering},
     thread,
+    time::Duration,
 };
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
@@ -25,6 +26,13 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 #[derive(Default)]
 struct HotkeyRuntimeState {
     in_flight_capture: AtomicBool,
+    cancel_requested: AtomicBool,
+    quit_after_cancel: AtomicBool,
+}
+
+enum TauriCliError {
+    Failed,
+    Cancelled,
 }
 
 #[derive(PartialEq, Eq)]
@@ -100,7 +108,7 @@ fn create_tray(app: &AppHandle) -> tauri::Result<()> {
             let app = app.clone();
 
             if id == "quit" {
-                app.exit(0);
+                request_quit(app);
                 return;
             }
 
@@ -135,6 +143,9 @@ fn handle_menu_action(app: AppHandle, id: String) {
             }
         }
         "disable" => {
+            app.state::<HotkeyRuntimeState>()
+                .cancel_requested
+                .store(true, Ordering::SeqCst);
             let response = run_tauri_cli(&["set-enabled", "false"]);
             if let Ok(value) = &response {
                 sync_rewrite_hotkey_registration(&app, value);
@@ -183,6 +194,9 @@ fn handle_rewrite_hotkey(app: AppHandle) {
         );
         return;
     }
+    state.cancel_requested.store(false, Ordering::SeqCst);
+    state.quit_after_cancel.store(false, Ordering::SeqCst);
+    set_tray_tooltip(&app, "Rewrite Hotkey - Rewriting...");
 
     thread::spawn(move || {
         let _ = run_tauri_cli(&["replacement-flow-started"]);
@@ -194,12 +208,32 @@ fn handle_rewrite_hotkey(app: AppHandle) {
                     session,
                 } = capture;
 
-                match run_tauri_cli_with_stdin(&["replacement-flow-rewrite"], &selected_text) {
+                if cancellation_requested(&app) {
+                    let native_payload = session.restore_without_paste();
+                    notify_replacement_flow_finished(
+                        &app,
+                        replacement_flow_finished_payload(
+                            "safe_failure",
+                            Some("disabled_app".to_string()),
+                            None,
+                            native_payload,
+                            None,
+                        ),
+                    );
+                    finish_hotkey_thread(&app);
+                    return;
+                }
+
+                match run_tauri_cli_with_stdin(&app, &["replacement-flow-rewrite"], &selected_text)
+                {
                     Ok(plan) => finish_replacement_flow_from_plan(&app, plan, session),
-                    Err(_) => {
+                    Err(error) => {
                         let native_payload = session.restore_without_paste();
                         let category = if native_payload.ok {
-                            Some("unexpected_error".to_string())
+                            Some(match error {
+                                TauriCliError::Cancelled => "disabled_app".to_string(),
+                                TauriCliError::Failed => "unexpected_error".to_string(),
+                            })
                         } else {
                             native_payload.category.map(str::to_string)
                         };
@@ -231,10 +265,42 @@ fn handle_rewrite_hotkey(app: AppHandle) {
             }
         }
 
-        app.state::<HotkeyRuntimeState>()
-            .in_flight_capture
-            .store(false, Ordering::SeqCst);
+        finish_hotkey_thread(&app);
     });
+}
+
+fn request_quit(app: AppHandle) {
+    let state = app.state::<HotkeyRuntimeState>();
+    state.cancel_requested.store(true, Ordering::SeqCst);
+
+    if state.in_flight_capture.load(Ordering::SeqCst) {
+        state.quit_after_cancel.store(true, Ordering::SeqCst);
+        notify(
+            &app,
+            "Rewrite cancellation requested",
+            "Rewrite Hotkey will quit after the current rewrite stops safely.",
+        );
+        return;
+    }
+
+    app.exit(0);
+}
+
+fn finish_hotkey_thread(app: &AppHandle) {
+    let state = app.state::<HotkeyRuntimeState>();
+    state.in_flight_capture.store(false, Ordering::SeqCst);
+    state.cancel_requested.store(false, Ordering::SeqCst);
+    set_tray_tooltip(app, "Rewrite Hotkey");
+
+    if state.quit_after_cancel.swap(false, Ordering::SeqCst) {
+        app.exit(0);
+    }
+}
+
+fn cancellation_requested(app: &AppHandle) -> bool {
+    app.state::<HotkeyRuntimeState>()
+        .cancel_requested
+        .load(Ordering::SeqCst)
 }
 
 fn sync_rewrite_hotkey_registration(app: &AppHandle, value: &Value) -> HotkeyRegistrationResult {
@@ -471,7 +537,11 @@ fn run_tauri_cli(args: &[&str]) -> Result<Value, ()> {
     serde_json::from_str(stdout.trim()).map_err(|_| ())
 }
 
-fn run_tauri_cli_with_stdin(args: &[&str], stdin_text: &str) -> Result<Value, ()> {
+fn run_tauri_cli_with_stdin(
+    app: &AppHandle,
+    args: &[&str],
+    stdin_text: &str,
+) -> Result<Value, TauriCliError> {
     let mut command = Command::new(npm_command());
     command
         .current_dir(project_root())
@@ -488,15 +558,32 @@ fn run_tauri_cli_with_stdin(args: &[&str], stdin_text: &str) -> Result<Value, ()
     #[cfg(windows)]
     command.creation_flags(CREATE_NO_WINDOW);
 
-    let mut child = command.spawn().map_err(|_| ())?;
+    let mut child = command.spawn().map_err(|_| TauriCliError::Failed)?;
     if let Some(stdin) = child.stdin.as_mut() {
-        stdin.write_all(stdin_text.as_bytes()).map_err(|_| ())?;
+        stdin
+            .write_all(stdin_text.as_bytes())
+            .map_err(|_| TauriCliError::Failed)?;
     }
     drop(child.stdin.take());
 
-    let output = child.wait_with_output().map_err(|_| ())?;
+    loop {
+        if cancellation_requested(app) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(TauriCliError::Cancelled);
+        }
+
+        match child.try_wait().map_err(|_| TauriCliError::Failed)? {
+            Some(_) => break,
+            None => thread::sleep(Duration::from_millis(50)),
+        }
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|_| TauriCliError::Failed)?;
     let stdout = String::from_utf8_lossy(&output.stdout);
-    serde_json::from_str(stdout.trim()).map_err(|_| ())
+    serde_json::from_str(stdout.trim()).map_err(|_| TauriCliError::Failed)
 }
 
 fn npm_command() -> &'static str {
@@ -600,4 +687,10 @@ fn notify_startup(app: &AppHandle, value: &Value) {
 
 fn notify(app: &AppHandle, title: &str, body: &str) {
     let _ = app.notification().builder().title(title).body(body).show();
+}
+
+fn set_tray_tooltip(app: &AppHandle, tooltip: &str) {
+    if let Some(tray) = app.tray_by_id("main") {
+        let _ = tray.set_tooltip(Some(tooltip));
+    }
 }
