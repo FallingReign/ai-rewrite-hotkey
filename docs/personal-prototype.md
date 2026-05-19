@@ -126,4 +126,14 @@ npm run tauri:check
 npm run tauri:build
 ```
 
+## Troubleshooting in development
+
+When running with `npm run tauri:dev`, the native runtime writes content-free diagnostics to the terminal with the prefix `[rewrite-hotkey-dev]`. These logs show each major step, such as hotkey receipt, capture, screenshot status, Azure rewrite planning, paste, clipboard restore, and notification outcome. They never print Selected Text, Replacement Text, screenshots, API keys, endpoints, or provider payloads.
+
+If the hotkey appears to do nothing, keep the terminal visible and look for the last step printed after `hotkey: received`. Common outcomes:
+
+- `capture: failed category=clipboard_snapshot_failed` means the app could not safely snapshot the current clipboard.
+- `flow: native paste finished outcome=safe_failure category=rewrite_target_changed` means focus moved before paste, so the replacement was discarded.
+- `notify: title=...` means the app attempted a Windows notification even if the OS hides it.
+
 Do not commit `%APPDATA%\Rewrite Hotkey\config.json`, metadata logs, screenshots, API keys, endpoints copied from private environments, Selected Text, Replacement Text, or provider payloads.

@@ -110,7 +110,12 @@ function rotateMetadataLogIfNeeded(logPath: string, nextBytes: number, maxBytes:
 
   const rotatedPath = getRotatedMetadataLogPath(logPath);
   fs.rmSync(rotatedPath, { force: true });
-  fs.renameSync(logPath, rotatedPath);
+  try {
+    fs.renameSync(logPath, rotatedPath);
+  } catch {
+    fs.copyFileSync(logPath, rotatedPath);
+    fs.truncateSync(logPath, 0);
+  }
 }
 
 function sanitiseMetadataLogEvent(event: MetadataLogEvent): Record<string, unknown> {

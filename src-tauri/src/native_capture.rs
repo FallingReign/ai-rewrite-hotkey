@@ -453,27 +453,31 @@ mod platform {
     pub(super) fn capture_clipboard_snapshot() -> Result<ClipboardSnapshot, ()> {
         with_clipboard(|| unsafe {
             let sequence_number = GetClipboardSequenceNumber();
+            let previous_plain_text = read_plain_text_from_open_clipboard().ok().flatten();
             let mut formats = Vec::new();
             let mut format = 0;
+            let mut had_formats = false;
 
             loop {
                 format = EnumClipboardFormats(format);
                 if format == 0 {
                     break;
                 }
+                had_formats = true;
 
                 let handle = GetClipboardData(format);
                 if handle.is_null() {
-                    return Err(());
+                    continue;
                 }
 
-                formats.push(ClipboardFormatData {
-                    format,
-                    handle: duplicate_global_memory(handle)?,
-                });
+                if let Ok(handle) = duplicate_global_memory(handle) {
+                    formats.push(ClipboardFormatData { format, handle });
+                }
             }
 
-            let previous_plain_text = read_plain_text_from_open_clipboard().ok().flatten();
+            if had_formats && formats.is_empty() && previous_plain_text.is_none() {
+                return Err(());
+            }
 
             Ok(ClipboardSnapshot {
                 sequence_number,
@@ -490,6 +494,7 @@ mod platform {
                     return Err(());
                 }
 
+                let mut restored_unicode_text = false;
                 for item in &mut self.formats {
                     let handle = item.handle;
                     if handle.is_null() {
@@ -501,6 +506,15 @@ mod platform {
                     }
 
                     item.handle = null_mut();
+                    if item.format == CF_UNICODETEXT {
+                        restored_unicode_text = true;
+                    }
+                }
+
+                if !restored_unicode_text {
+                    if let Some(text) = self.previous_plain_text.as_deref() {
+                        set_open_clipboard_plain_text(text)?;
+                    }
                 }
 
                 Ok(())
@@ -551,27 +565,24 @@ mod platform {
     }
 
     pub(super) fn set_clipboard_plain_text(text: &str) -> Result<(), ()> {
-        let mut handle = unicode_text_handle(text)?;
-        let result = with_clipboard(|| unsafe {
+        with_clipboard(|| unsafe {
             if EmptyClipboard() == 0 {
                 return Err(());
             }
 
-            if SetClipboardData(CF_UNICODETEXT, handle as HANDLE).is_null() {
-                return Err(());
-            }
+            set_open_clipboard_plain_text(text)
+        })
+    }
 
-            handle = null_mut();
-            Ok(())
-        });
+    unsafe fn set_open_clipboard_plain_text(text: &str) -> Result<(), ()> {
+        let handle = unicode_text_handle(text)?;
 
-        if !handle.is_null() {
-            unsafe {
-                GlobalFree(handle);
-            }
+        if SetClipboardData(CF_UNICODETEXT, handle as HANDLE).is_null() {
+            GlobalFree(handle);
+            return Err(());
         }
 
-        result
+        Ok(())
     }
 
     fn unicode_text_handle(text: &str) -> Result<HGLOBAL, ()> {

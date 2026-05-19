@@ -39,6 +39,7 @@ struct HotkeyRuntimeState {
     quit_after_cancel: AtomicBool,
 }
 
+#[derive(Clone, Copy)]
 enum TauriCliError {
     Failed,
     Cancelled,
@@ -52,6 +53,7 @@ enum HotkeyRegistrationResult {
 }
 
 pub fn run() {
+    dev_log("starting Tauri runtime");
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin(
@@ -79,6 +81,7 @@ pub fn run() {
             }
         })
         .setup(|app| {
+            dev_log("setup: creating tray and checking app state");
             create_tray(app.handle())?;
             match run_tauri_cli(&["app-started"]) {
                 Ok(value) => {
@@ -274,8 +277,10 @@ fn settings_close(app: AppHandle) -> Result<(), String> {
 }
 
 fn handle_rewrite_hotkey(app: AppHandle) {
+    dev_log("hotkey: received");
     let state = app.state::<HotkeyRuntimeState>();
     if state.in_flight_capture.swap(true, Ordering::SeqCst) {
+        dev_log("hotkey: ignored because rewrite is already in flight");
         notify(
             &app,
             "Rewrite already in progress",
@@ -288,16 +293,23 @@ fn handle_rewrite_hotkey(app: AppHandle) {
     set_tray_tooltip(&app, "Rewrite Hotkey - Rewriting...");
 
     thread::spawn(move || {
+        dev_log("flow: started");
         let _ = run_tauri_cli(&["replacement-flow-started"]);
 
+        dev_log("capture: starting Selected Text capture");
         match native_capture::capture_selected_text_for_replacement() {
             native_capture::ReplacementCaptureResult::Captured(capture) => {
                 let native_capture::ReplacementCapture {
                     selected_text,
                     session,
                 } = capture;
+                dev_log(&format!(
+                    "capture: selected text captured chars={}",
+                    selected_text.chars().count()
+                ));
 
                 if cancellation_requested(&app) {
+                    dev_log("flow: cancellation requested after capture");
                     let native_payload = session.restore_without_paste();
                     notify_replacement_flow_finished(
                         &app,
@@ -313,9 +325,15 @@ fn handle_rewrite_hotkey(app: AppHandle) {
                     return;
                 }
 
+                dev_log("screenshot: checking optional Screenshot Context");
                 let screenshot_context = capture_optional_screenshot_context();
+                dev_log(&format!(
+                    "screenshot: {}",
+                    screenshot_context_status(&screenshot_context)
+                ));
 
                 if cancellation_requested(&app) {
+                    dev_log("flow: cancellation requested after screenshot");
                     let native_payload = session.restore_without_paste();
                     notify_replacement_flow_finished(
                         &app,
@@ -331,14 +349,29 @@ fn handle_rewrite_hotkey(app: AppHandle) {
                     return;
                 }
 
+                dev_log("rewrite: starting Azure rewrite request");
                 match run_tauri_cli_with_rewrite_input(
                     &app,
                     &["replacement-flow-rewrite"],
                     &selected_text,
                     screenshot_context,
                 ) {
-                    Ok(plan) => finish_replacement_flow_from_plan(&app, plan, session),
+                    Ok(plan) => {
+                        dev_log(&format!(
+                            "rewrite: plan received action={} category={}",
+                            value_str(&plan, "action").unwrap_or("unknown"),
+                            value_str(&plan, "category").unwrap_or("none")
+                        ));
+                        finish_replacement_flow_from_plan(&app, plan, session)
+                    }
                     Err(error) => {
+                        dev_log(&format!(
+                            "rewrite: failed before plan error={}",
+                            match error {
+                                TauriCliError::Cancelled => "cancelled",
+                                TauriCliError::Failed => "failed",
+                            }
+                        ));
                         let native_payload = session.restore_without_paste();
                         let category = if native_payload.ok {
                             Some(match error {
@@ -362,6 +395,11 @@ fn handle_rewrite_hotkey(app: AppHandle) {
                 }
             }
             native_capture::ReplacementCaptureResult::Failed(native_payload) => {
+                dev_log(&format!(
+                    "capture: failed category={} durationMs={}",
+                    native_payload.category.unwrap_or("unknown"),
+                    native_payload.metadata.duration_ms
+                ));
                 let category = native_payload.category.map(str::to_string);
                 notify_replacement_flow_finished(
                     &app,
@@ -433,24 +471,45 @@ fn capture_optional_screenshot_context() -> Option<Value> {
     })
 }
 
+fn screenshot_context_status(value: &Option<Value>) -> String {
+    match value {
+        None => "disabled".to_string(),
+        Some(value) if value.get("ok").and_then(Value::as_bool) == Some(true) => {
+            let bytes = value
+                .get("byteLength")
+                .and_then(Value::as_u64)
+                .unwrap_or_default();
+            format!("captured bytes={bytes}")
+        }
+        Some(value) => format!(
+            "degraded category={}",
+            value_str(value, "category").unwrap_or("unknown")
+        ),
+    }
+}
+
 fn sync_rewrite_hotkey_registration(app: &AppHandle, value: &Value) -> HotkeyRegistrationResult {
     let _ = app.global_shortcut().unregister_all();
 
     if !hotkey_registration_allowed(value) {
+        dev_log("hotkey: registration skipped because app is not ready");
         return HotkeyRegistrationResult::NotNeeded;
     }
 
     let Some(hotkey) = load_configured_hotkey() else {
+        dev_log("hotkey: registration failed category=hotkey_invalid");
         notify_hotkey_registration_finished(app, false, "hotkey_invalid");
         return HotkeyRegistrationResult::Failed;
     };
 
     match app.global_shortcut().register(hotkey.as_str()) {
         Ok(()) => {
+            dev_log(&format!("hotkey: registered {hotkey}"));
             notify_hotkey_registration_finished(app, true, "");
             HotkeyRegistrationResult::Registered
         }
         Err(_) => {
+            dev_log("hotkey: registration failed category=hotkey_registration_conflict");
             notify_hotkey_registration_finished(app, false, "hotkey_registration_conflict");
             HotkeyRegistrationResult::Failed
         }
@@ -496,7 +555,9 @@ fn finish_replacement_flow_from_plan(
 
     match plan.get("action").and_then(Value::as_str) {
         Some("paste") => {
+            dev_log("paste: paste plan received");
             let Some(paste_text) = plan.get("pasteText").and_then(Value::as_str) else {
+                dev_log("paste: missing paste text in plan");
                 let native_payload = session.restore_without_paste();
                 let category = if native_payload.ok {
                     Some("unexpected_error".to_string())
@@ -516,6 +577,10 @@ fn finish_replacement_flow_from_plan(
                 return;
             };
 
+            dev_log(&format!(
+                "paste: attempting paste chars={}",
+                paste_text.chars().count()
+            ));
             let native_payload = session.paste_replacement_and_restore(paste_text);
             let outcome = if native_payload.ok {
                 "succeeded"
@@ -523,6 +588,13 @@ fn finish_replacement_flow_from_plan(
                 "safe_failure"
             };
             let category = native_payload.category.map(str::to_string);
+            dev_log(&format!(
+                "flow: native paste finished outcome={} category={} pasteSent={} clipboardRestored={}",
+                outcome,
+                category.as_deref().unwrap_or("none"),
+                native_payload.metadata.paste_sent,
+                native_payload.metadata.clipboard_restored
+            ));
             notify_replacement_flow_finished(
                 app,
                 replacement_flow_finished_payload(
@@ -535,6 +607,7 @@ fn finish_replacement_flow_from_plan(
             );
         }
         Some("noop") => {
+            dev_log("flow: no-op plan; restoring clipboard");
             let native_payload = session.restore_without_paste();
             let (outcome, category) = if native_payload.ok {
                 ("noop", None)
@@ -553,6 +626,10 @@ fn finish_replacement_flow_from_plan(
             );
         }
         Some("restore") => {
+            dev_log(&format!(
+                "flow: restore plan category={}",
+                value_str(&plan, "category").unwrap_or("unknown")
+            ));
             let plan_category = plan
                 .get("category")
                 .and_then(Value::as_str)
@@ -576,6 +653,7 @@ fn finish_replacement_flow_from_plan(
             );
         }
         _ => {
+            dev_log("flow: unexpected plan shape; restoring clipboard");
             let native_payload = session.restore_without_paste();
             let category = if native_payload.ok {
                 Some("unexpected_error".to_string())
@@ -652,9 +730,15 @@ fn notify_replacement_flow_finished(app: &AppHandle, payload: Value) {
         .unwrap_or(false);
 
     if silent_success && !degraded_success {
+        dev_log("notify: silent success");
         return;
     }
 
+    dev_log(&format!(
+        "notify: replacement flow outcome={} category={}",
+        value_str(&payload, "outcome").unwrap_or("unknown"),
+        value_str(&payload, "category").unwrap_or("none")
+    ));
     notify_from_cli_response(
         app,
         response,
@@ -671,6 +755,7 @@ fn open_settings_window(app: &AppHandle) -> Result<(), ()> {
 }
 
 fn run_tauri_cli(args: &[&str]) -> Result<Value, ()> {
+    dev_log(&format!("cli: running {}", args.join(" ")));
     let mut command = Command::new(npm_command());
     command
         .current_dir(project_root())
@@ -687,10 +772,17 @@ fn run_tauri_cli(args: &[&str]) -> Result<Value, ()> {
 
     let output = command.output().map_err(|_| ())?;
     let stdout = String::from_utf8_lossy(&output.stdout);
-    serde_json::from_str(stdout.trim()).map_err(|_| ())
+    let value: Value = serde_json::from_str(stdout.trim()).map_err(|_| ())?;
+    dev_log(&format!(
+        "cli: completed {} ok={}",
+        args.first().copied().unwrap_or("unknown"),
+        value.get("ok").and_then(Value::as_bool).unwrap_or(false)
+    ));
+    Ok(value)
 }
 
 fn run_tauri_cli_with_json_input(args: &[&str], input: &Value) -> Result<Value, ()> {
+    dev_log(&format!("cli: running {} with json stdin", args.join(" ")));
     let stdin_text = input.to_string();
     let mut command = Command::new(npm_command());
     command
@@ -715,7 +807,13 @@ fn run_tauri_cli_with_json_input(args: &[&str], input: &Value) -> Result<Value, 
 
     let output = child.wait_with_output().map_err(|_| ())?;
     let stdout = String::from_utf8_lossy(&output.stdout);
-    serde_json::from_str(stdout.trim()).map_err(|_| ())
+    let value: Value = serde_json::from_str(stdout.trim()).map_err(|_| ())?;
+    dev_log(&format!(
+        "cli: completed {} ok={}",
+        args.first().copied().unwrap_or("unknown"),
+        value.get("ok").and_then(Value::as_bool).unwrap_or(false)
+    ));
+    Ok(value)
 }
 
 fn run_tauri_cli_with_rewrite_input(
@@ -724,6 +822,10 @@ fn run_tauri_cli_with_rewrite_input(
     selected_text: &str,
     screenshot_context: Option<Value>,
 ) -> Result<Value, TauriCliError> {
+    dev_log(&format!(
+        "cli: running {} with private rewrite stdin",
+        args.join(" ")
+    ));
     let input = serde_json::json!({
         "selectedText": selected_text,
         "screenshotContext": screenshot_context
@@ -771,7 +873,13 @@ fn run_tauri_cli_with_rewrite_input(
         .wait_with_output()
         .map_err(|_| TauriCliError::Failed)?;
     let stdout = String::from_utf8_lossy(&output.stdout);
-    serde_json::from_str(stdout.trim()).map_err(|_| TauriCliError::Failed)
+    let value: Value = serde_json::from_str(stdout.trim()).map_err(|_| TauriCliError::Failed)?;
+    dev_log(&format!(
+        "cli: completed {} ok={}",
+        args.first().copied().unwrap_or("unknown"),
+        value.get("ok").and_then(Value::as_bool).unwrap_or(false)
+    ));
+    Ok(value)
 }
 
 fn sync_launch_on_startup(app: &AppHandle, value: &Value) {
@@ -973,6 +1081,7 @@ fn notify_startup(app: &AppHandle, value: &Value) {
 }
 
 fn notify(app: &AppHandle, title: &str, body: &str) {
+    dev_log(&format!("notify: title={title}"));
     let _ = app.notification().builder().title(title).body(body).show();
 }
 
@@ -981,3 +1090,15 @@ fn set_tray_tooltip(app: &AppHandle, tooltip: &str) {
         let _ = tray.set_tooltip(Some(tooltip));
     }
 }
+
+fn value_str<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
+    value.get(key).and_then(Value::as_str)
+}
+
+#[cfg(debug_assertions)]
+fn dev_log(message: &str) {
+    eprintln!("[rewrite-hotkey-dev] {message}");
+}
+
+#[cfg(not(debug_assertions))]
+fn dev_log(_message: &str) {}
