@@ -4,6 +4,19 @@ import type { FetchLike, RewritePrompt } from "./types.js";
 
 export const TEXT_ONLY_REQUEST_PAYLOAD_MAX_BYTES = 32768;
 
+export interface RewriteTimer {
+  setTimeout(callback: () => void, ms: number): unknown;
+  clearTimeout(handle: unknown): void;
+}
+
+export interface AzureRewriteClientOptions {
+  timer?: RewriteTimer;
+}
+
+export interface AzureRewriteRequestOptions {
+  abortSignal?: AbortSignal;
+}
+
 interface AzureChatCompletionsRequestBody {
   messages: RewritePrompt["messages"];
 }
@@ -19,13 +32,15 @@ interface AzureChatCompletionsResponseBody {
 export class AzureRewriteClient {
   private readonly config: RewriteHotkeyConfig;
   private readonly fetchFn: FetchLike;
+  private readonly timer: RewriteTimer;
 
-  constructor(config: RewriteHotkeyConfig, fetchFn: FetchLike = fetch) {
+  constructor(config: RewriteHotkeyConfig, fetchFn: FetchLike = fetch, options: AzureRewriteClientOptions = {}) {
     this.config = config;
     this.fetchFn = fetchFn;
+    this.timer = options.timer ?? defaultRewriteTimer;
   }
 
-  async rewrite(prompt: RewritePrompt): Promise<string> {
+  async rewrite(prompt: RewritePrompt, options: AzureRewriteRequestOptions = {}): Promise<string> {
     const body = buildAzureChatCompletionsBody(prompt);
     const payload = JSON.stringify(body);
 
@@ -34,7 +49,18 @@ export class AzureRewriteClient {
     }
 
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.config.timeoutMs);
+    let timedOut = false;
+    const timeout = this.timer.setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, this.config.timeoutMs);
+    const abortFromCaller = () => controller.abort();
+
+    if (options.abortSignal?.aborted) {
+      controller.abort();
+    } else {
+      options.abortSignal?.addEventListener("abort", abortFromCaller, { once: true });
+    }
 
     try {
       const response = await this.fetchFn(buildAzureChatCompletionsUrl(this.config), {
@@ -47,6 +73,10 @@ export class AzureRewriteClient {
         signal: controller.signal
       });
 
+      if (controller.signal.aborted) {
+        throw new RewriteSafeFailureError(timedOut ? "azure_timeout" : "unexpected_error");
+      }
+
       if (!response.ok) {
         throw new RewriteSafeFailureError("azure_http_error", { httpStatus: response.status });
       }
@@ -58,15 +88,25 @@ export class AzureRewriteClient {
       }
 
       if (controller.signal.aborted) {
-        throw new RewriteSafeFailureError("azure_timeout");
+        throw new RewriteSafeFailureError(timedOut ? "azure_timeout" : "unexpected_error");
       }
 
       throw new RewriteSafeFailureError("azure_network_error");
     } finally {
-      clearTimeout(timeout);
+      this.timer.clearTimeout(timeout);
+      options.abortSignal?.removeEventListener("abort", abortFromCaller);
     }
   }
 }
+
+const defaultRewriteTimer: RewriteTimer = {
+  setTimeout(callback, ms) {
+    return globalThis.setTimeout(callback, ms);
+  },
+  clearTimeout(handle) {
+    globalThis.clearTimeout(handle as ReturnType<typeof globalThis.setTimeout>);
+  }
+};
 
 export function buildAzureChatCompletionsBody(prompt: RewritePrompt): AzureChatCompletionsRequestBody {
   return {

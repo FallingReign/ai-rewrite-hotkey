@@ -68,3 +68,14 @@ test("Configured App state allows future hotkey registration and Test Rewrite", 
   assert.equal(menu.items.find((item) => item.id === "disable")?.enabled, true);
   assert.equal(menu.items.find((item) => item.id === "test_rewrite")?.enabled, true);
 });
+
+test("In-Flight Rewrite state exposes subtle rewriting status without disabling tray actions", () => {
+  const state = deriveRewriteAppState(CONFIGURED_CONFIG, { rewriteInFlight: true });
+  const menu = deriveTrayMenuModel(state);
+
+  assert.equal(state.rewriteStatus, "rewriting");
+  assert.equal(canStartReplacementFlow(state), false);
+  assert.equal(menu.statusLabel, "Rewriting...");
+  assert.equal(menu.items.find((item) => item.id === "disable")?.enabled, true);
+  assert.equal(menu.items.find((item) => item.id === "test_rewrite")?.enabled, true);
+});

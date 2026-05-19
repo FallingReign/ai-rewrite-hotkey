@@ -378,6 +378,7 @@ function metadataCategoryFrom(value: unknown): MetadataCategory | undefined {
     case "disabled_app":
     case "configuration_required":
     case "rewrite_target_unavailable":
+    case "rewrite_target_changed":
     case "clipboard_snapshot_failed":
     case "copy_failed":
     case "clipboard_restore_failed":
@@ -455,10 +456,20 @@ function replacementFlowNotification(event: MetadataLogEvent): { title: string; 
   }
 
   switch (event.category) {
+    case "disabled_app":
+      return {
+        title: "Rewrite Hotkey disabled",
+        body: "The in-flight rewrite was cancelled. Original selection and clipboard were restored where possible."
+      };
     case "selected_text_empty":
       return {
         title: "No Selected Text captured",
         body: "Select usable text before pressing Rewrite Hotkey."
+      };
+    case "rewrite_target_changed":
+      return {
+        title: "Rewrite target changed",
+        body: "The foreground app changed before paste, so the rewrite was discarded and the clipboard was restored where possible."
       };
     case "clipboard_snapshot_failed":
       return {

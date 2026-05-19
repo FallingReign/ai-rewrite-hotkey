@@ -20,6 +20,8 @@ export interface TextOnlyRewriteRequest {
   config: RewriteHotkeyConfig;
   selectedText: string;
   fetchFn?: FetchLike;
+  abortSignal?: AbortSignal;
+  timer?: RewriteTimer;
 }
 
 export type SafeFailureCategory =
@@ -57,4 +59,9 @@ export interface NoOpRewriteResult {
 export type RewriteResult = ReplacementResult | NoOpRewriteResult | SafeFailureResult;
 
 export type FetchLike = (input: string | URL, init: RequestInit) => Promise<Response>;
+
+export interface RewriteTimer {
+  setTimeout(callback: () => void, ms: number): unknown;
+  clearTimeout(handle: unknown): void;
+}
 

@@ -1,13 +1,17 @@
 import { validateConfig } from "../config/config.js";
 import type { RewriteHotkeyConfig } from "../config/types.js";
 
-export type RewriteStatus = "ready" | "configuration_required" | "disabled";
+export type RewriteStatus = "ready" | "configuration_required" | "disabled" | "rewriting";
 
 export interface RewriteAppState {
   enabled: boolean;
   configured: boolean;
   hotkeyRegistrationAllowed: boolean;
   rewriteStatus: RewriteStatus;
+}
+
+export interface RewriteRuntimeState {
+  rewriteInFlight?: boolean;
 }
 
 export interface TrayMenuItemModel {
@@ -21,16 +25,17 @@ export interface TrayMenuModel {
   items: TrayMenuItemModel[];
 }
 
-export function deriveRewriteAppState(config: RewriteHotkeyConfig): RewriteAppState {
+export function deriveRewriteAppState(config: RewriteHotkeyConfig, runtime: RewriteRuntimeState = {}): RewriteAppState {
   const configured = validateConfig(config).isConfigured;
   const enabled = config.enabled;
   const hotkeyRegistrationAllowed = enabled && configured;
+  const rewriteStatus = runtime.rewriteInFlight && hotkeyRegistrationAllowed ? "rewriting" : enabled ? (configured ? "ready" : "configuration_required") : "disabled";
 
   return {
     enabled,
     configured,
     hotkeyRegistrationAllowed,
-    rewriteStatus: enabled ? (configured ? "ready" : "configuration_required") : "disabled"
+    rewriteStatus
   };
 }
 
@@ -72,7 +77,7 @@ export function canRegisterRewriteHotkey(state: RewriteAppState): boolean {
 }
 
 export function canStartReplacementFlow(state: RewriteAppState): boolean {
-  return state.hotkeyRegistrationAllowed;
+  return state.hotkeyRegistrationAllowed && state.rewriteStatus !== "rewriting";
 }
 
 export function canRunTestRewrite(state: RewriteAppState): boolean {
@@ -90,6 +95,8 @@ function statusLabelFor(state: RewriteAppState): string {
   switch (state.rewriteStatus) {
     case "ready":
       return "Ready";
+    case "rewriting":
+      return "Rewriting...";
     case "configuration_required":
       return "Settings required";
     case "disabled":

@@ -30,6 +30,7 @@ export type MetadataCategory =
   | SafeFailureCategory
   | SelectedTextCaptureFailureCategory
   | "disabled_app"
+  | "rewrite_target_changed"
   | "clipboard_write_failed"
   | "paste_failed"
   | "hotkey_registration_conflict"

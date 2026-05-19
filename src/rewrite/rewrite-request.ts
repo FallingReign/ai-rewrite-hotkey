@@ -33,10 +33,10 @@ export async function runTextOnlyRewriteRequest(request: TextOnlyRewriteRequest)
     return safeFailure(prepared.category);
   }
 
-  const client = new AzureRewriteClient(request.config, request.fetchFn);
+  const client = new AzureRewriteClient(request.config, request.fetchFn, { timer: request.timer });
 
   try {
-    const modelOutput = await client.rewrite(prepared.request.prompt);
+    const modelOutput = await client.rewrite(prepared.request.prompt, { abortSignal: request.abortSignal });
     return validateReplacementText(request.selectedText, modelOutput);
   } catch (error) {
     if (error instanceof RewriteSafeFailureError) {
