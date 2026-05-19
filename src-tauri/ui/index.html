@@ -97,6 +97,26 @@
         border-color: #c42b1c;
       }
 
+      .hotkey-control {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 8px;
+        align-items: center;
+      }
+
+      .hotkey-control input {
+        font-family: Consolas, "Cascadia Mono", monospace;
+      }
+
+      .hotkey-capture {
+        grid-column: 1 / -1;
+        min-height: 18px;
+      }
+
+      .hotkey-capture.active {
+        color: #0f6cbd;
+      }
+
       .hint {
         color: GrayText;
         font-size: 12px;
@@ -198,8 +218,13 @@
           </label>
           <label>
             Rewrite Hotkey
-            <input id="hotkey" name="hotkey" type="text" autocomplete="off" />
-            <span class="hint">Example: Ctrl+Alt+Space</span>
+            <span class="hotkey-control">
+              <input id="hotkey" name="hotkey" type="text" autocomplete="off" readonly />
+              <button id="change-hotkey" type="button">Change</button>
+              <span id="hotkey-capture-hint" class="hint hotkey-capture">
+                Use Change, then press a shortcut such as Ctrl+Alt+Space.
+              </span>
+            </span>
           </label>
           <label>
             Rewrite Timeout
@@ -246,6 +271,10 @@
       const status = document.querySelector("#status");
       const issues = document.querySelector("#issues");
       const apiKeyHint = document.querySelector("#api-key-hint");
+      const hotkeyInput = document.querySelector("#hotkey");
+      const changeHotkeyButton = document.querySelector("#change-hotkey");
+      const hotkeyCaptureHint = document.querySelector("#hotkey-capture-hint");
+      let hotkeyCaptureActive = false;
       const fieldNames = [
         "enabled",
         "hotkey",
@@ -266,6 +295,7 @@
         form.addEventListener("submit", saveSettings);
         document.querySelector("#cancel").addEventListener("click", () => invoke("settings_close"));
         document.querySelector("#clear-api-key").addEventListener("click", clearApiKey);
+        changeHotkeyButton.addEventListener("click", startHotkeyCapture);
       }
 
       async function loadSettings() {
@@ -279,6 +309,7 @@
 
       async function saveSettings(event) {
         event.preventDefault();
+        stopHotkeyCapture("Shortcut capture cancelled.");
         setStatus("Saving settings...");
         try {
           const response = await invoke("settings_save", { draft: collectDraft() });
@@ -331,8 +362,126 @@
           ? `Stored key: ${values.azureOpenAIApiKeyRedacted}. Leave blank to keep it.`
           : "No API key is stored. Enter one before saving a configured app.";
         document.querySelector("#locked-guardrails").textContent = settings.lockedGuardrails;
+        stopHotkeyCapture("Use Change, then press a shortcut such as Ctrl+Alt+Space.");
         renderIssues(settings.validation.issues);
         setStatus(message, response.ok === false);
+      }
+
+      function startHotkeyCapture() {
+        if (hotkeyCaptureActive) {
+          stopHotkeyCapture("Shortcut capture cancelled.");
+          return;
+        }
+
+        hotkeyCaptureActive = true;
+        changeHotkeyButton.textContent = "Cancel";
+        changeHotkeyButton.setAttribute("aria-pressed", "true");
+        hotkeyCaptureHint.textContent = "Press the new shortcut now. Escape cancels.";
+        hotkeyCaptureHint.classList.add("active");
+        setStatus("Waiting for new Rewrite Hotkey...");
+        window.addEventListener("keydown", captureHotkey, true);
+        hotkeyInput.focus();
+      }
+
+      function stopHotkeyCapture(message) {
+        if (!hotkeyCaptureActive) {
+          return;
+        }
+
+        hotkeyCaptureActive = false;
+        changeHotkeyButton.textContent = "Change";
+        changeHotkeyButton.setAttribute("aria-pressed", "false");
+        hotkeyCaptureHint.textContent = message;
+        hotkeyCaptureHint.classList.remove("active");
+        window.removeEventListener("keydown", captureHotkey, true);
+      }
+
+      function captureHotkey(event) {
+        event.preventDefault();
+        event.stopPropagation();
+
+        if (event.key === "Escape") {
+          stopHotkeyCapture("Shortcut capture cancelled.");
+          setStatus("Shortcut unchanged.");
+          return;
+        }
+
+        const hotkey = hotkeyFromEvent(event);
+        if (hotkey === null) {
+          hotkeyCaptureHint.textContent = "Press at least one modifier plus one key.";
+          return;
+        }
+
+        hotkeyInput.value = hotkey;
+        stopHotkeyCapture(`Captured ${hotkey}. Save to apply it.`);
+        setStatus("Shortcut captured. Save settings to register it.");
+      }
+
+      function hotkeyFromEvent(event) {
+        const key = normaliseHotkeyKey(event.key, event.code);
+        if (key === null) {
+          return null;
+        }
+
+        const modifiers = [];
+        if (event.ctrlKey) {
+          modifiers.push("Ctrl");
+        }
+        if (event.altKey) {
+          modifiers.push("Alt");
+        }
+        if (event.shiftKey) {
+          modifiers.push("Shift");
+        }
+        if (event.metaKey) {
+          modifiers.push("Win");
+        }
+
+        if (modifiers.length === 0) {
+          return null;
+        }
+
+        return [...modifiers, key].join("+");
+      }
+
+      function normaliseHotkeyKey(key, code) {
+        if (["Control", "Alt", "Shift", "Meta", "OS"].includes(key)) {
+          return null;
+        }
+
+        if (key === " " || key === "Spacebar" || code === "Space") {
+          return "Space";
+        }
+
+        if (key.length === 1) {
+          return key.toUpperCase();
+        }
+
+        const namedKeys = {
+          ArrowUp: "ArrowUp",
+          ArrowDown: "ArrowDown",
+          ArrowLeft: "ArrowLeft",
+          ArrowRight: "ArrowRight",
+          Backspace: "Backspace",
+          Delete: "Delete",
+          End: "End",
+          Enter: "Enter",
+          Home: "Home",
+          Insert: "Insert",
+          PageDown: "PageDown",
+          PageUp: "PageUp",
+          Tab: "Tab"
+        };
+
+        if (key in namedKeys) {
+          return namedKeys[key];
+        }
+
+        if (/^F([1-9]|1[0-9]|2[0-4])$/.test(key)) {
+          return key;
+        }
+
+        return null;
       }
 
       function renderIssues(validationIssues) {

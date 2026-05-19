@@ -53,6 +53,8 @@ Other V0 settings:
 
 The settings UI leaves the API key input blank and only shows whether a stored key exists. Use **Clear API key** to remove the local key. **Locked Guardrails** are shown for reference but are not editable.
 
+To change the Rewrite Hotkey, use **Change** next to the hotkey field, then press the desired shortcut. The app captures the key combination and applies it after **Save**.
+
 ## Running the app
 
 Start the tray app in development:
