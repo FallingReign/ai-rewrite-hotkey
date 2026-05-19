@@ -8,11 +8,16 @@
     "config:open": "tsx src/config/cli.ts open",
     "config:path": "tsx src/config/cli.ts path",
     "config:status": "tsx src/config/cli.ts status",
+    "app:tauri": "tsx src/app/tauri-cli.ts",
     "rewrite:test": "tsx src/rewrite/cli.ts",
+    "tauri:dev": "node scripts/with-cargo-path.mjs tauri dev",
+    "tauri:build": "node scripts/with-cargo-path.mjs tauri build",
+    "tauri:check": "node scripts/with-cargo-path.mjs cargo check --manifest-path src-tauri/Cargo.toml",
     "test": "node --test --import tsx \"src/**/*.test.ts\"",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
+    "@tauri-apps/cli": "^2.11.2",
     "@types/node": "^24.0.0",
     "tsx": "^4.19.4",
     "typescript": "^5.8.3"

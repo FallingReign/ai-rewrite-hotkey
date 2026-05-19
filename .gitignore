@@ -10,3 +10,5 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
+src-tauri/gen/
+src-tauri/target/

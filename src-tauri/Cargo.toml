@@ -1,0 +1,18 @@
+[package]
+name = "rewrite-hotkey"
+version = "0.0.0"
+description = "Rewrite Hotkey"
+authors = ["FallingReign"]
+edition = "2021"
+
+[lib]
+name = "rewrite_hotkey_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+serde_json = "1"
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-notification = "2"

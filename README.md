@@ -53,9 +53,20 @@ npm run rewrite:test
 
 The command sends only a built-in sample, validates plain **Replacement Text**, classifies **Safe Failure** and **No-Op Rewrite** outcomes, and keeps output content-free. It does not print config values, API keys, endpoints, Selected Text, Replacement Text, or full provider payloads.
 
+## Tauri tray shell
+
+Run the tray-first desktop shell:
+
+```powershell
+npm run tauri:dev
+```
+
+The tray menu exposes enable, disable, open settings, Test Rewrite, and quit actions. The shell does not register or execute the Rewrite Hotkey unless the app is enabled and configured. Test Rewrite uses the built-in sample and logs metadata only.
+
 ## Development checks
 
 ```powershell
 npm test
 npm run typecheck
+npm run tauri:check
 ```
