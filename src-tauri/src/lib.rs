@@ -2,14 +2,18 @@ use serde_json::Value;
 use std::{
     path::PathBuf,
     process::{Command, Stdio},
+    sync::atomic::{AtomicBool, Ordering},
     thread,
 };
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::TrayIconBuilder,
-    AppHandle,
+    AppHandle, Manager,
 };
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use tauri_plugin_notification::NotificationExt;
+
+mod native_capture;
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -17,13 +21,40 @@ use std::os::windows::process::CommandExt;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
+#[derive(Default)]
+struct HotkeyRuntimeState {
+    in_flight_capture: AtomicBool,
+}
+
+#[derive(PartialEq, Eq)]
+enum HotkeyRegistrationResult {
+    Registered,
+    NotNeeded,
+    Failed,
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, _shortcut, event| {
+                    if event.state == ShortcutState::Released {
+                        handle_rewrite_hotkey(app.clone());
+                    }
+                })
+                .build(),
+        )
+        .manage(HotkeyRuntimeState::default())
         .setup(|app| {
             create_tray(app.handle())?;
             match run_tauri_cli(&["app-started"]) {
-                Ok(value) => notify_startup(app.handle(), &value),
+                Ok(value) => {
+                    let registration = sync_rewrite_hotkey_registration(app.handle(), &value);
+                    if registration != HotkeyRegistrationResult::Failed {
+                        notify_startup(app.handle(), &value);
+                    }
+                }
                 Err(_) => notify(
                     app.handle(),
                     "Rewrite Hotkey started",
@@ -39,7 +70,8 @@ pub fn run() {
 fn create_tray(app: &AppHandle) -> tauri::Result<()> {
     let enable = MenuItem::with_id(app, "enable", "Enable Rewrite Hotkey", true, None::<&str>)?;
     let disable = MenuItem::with_id(app, "disable", "Disable Rewrite Hotkey", true, None::<&str>)?;
-    let open_settings = MenuItem::with_id(app, "open_settings", "Open Settings", true, None::<&str>)?;
+    let open_settings =
+        MenuItem::with_id(app, "open_settings", "Open Settings", true, None::<&str>)?;
     let test_rewrite = MenuItem::with_id(app, "test_rewrite", "Test Rewrite", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
     let separator_one = PredefinedMenuItem::separator(app)?;
@@ -84,18 +116,35 @@ fn create_tray(app: &AppHandle) -> tauri::Result<()> {
 
 fn handle_menu_action(app: AppHandle, id: String) {
     match id.as_str() {
-        "enable" => notify_from_cli_response(
-            &app,
-            run_tauri_cli(&["set-enabled", "true"]),
-            "Rewrite Hotkey enabled",
-            "The app state was updated.",
-        ),
-        "disable" => notify_from_cli_response(
-            &app,
-            run_tauri_cli(&["set-enabled", "false"]),
-            "Rewrite Hotkey disabled",
-            "No rewrite hotkey or rewrite work will run.",
-        ),
+        "enable" => {
+            let response = run_tauri_cli(&["set-enabled", "true"]);
+            let registration = if let Ok(value) = &response {
+                sync_rewrite_hotkey_registration(&app, value)
+            } else {
+                HotkeyRegistrationResult::NotNeeded
+            };
+
+            if registration != HotkeyRegistrationResult::Failed {
+                notify_from_cli_response(
+                    &app,
+                    response,
+                    "Rewrite Hotkey enabled",
+                    "The app state was updated.",
+                );
+            }
+        }
+        "disable" => {
+            let response = run_tauri_cli(&["set-enabled", "false"]);
+            if let Ok(value) = &response {
+                sync_rewrite_hotkey_registration(&app, value);
+            }
+            notify_from_cli_response(
+                &app,
+                response,
+                "Rewrite Hotkey disabled",
+                "No rewrite hotkey or rewrite work will run.",
+            );
+        }
         "open_settings" => notify_from_cli_response(
             &app,
             run_tauri_cli(&["open-settings"]),
@@ -103,7 +152,11 @@ fn handle_menu_action(app: AppHandle, id: String) {
             "Review local settings before enabling Rewrite Hotkey.",
         ),
         "test_rewrite" => {
-            notify(&app, "Test Rewrite started", "Using the built-in sample only.");
+            notify(
+                &app,
+                "Test Rewrite started",
+                "Using the built-in sample only.",
+            );
             notify_from_cli_response(
                 &app,
                 run_tauri_cli(&["test-rewrite"]),
@@ -116,6 +169,86 @@ fn handle_menu_action(app: AppHandle, id: String) {
             "Rewrite Hotkey action failed",
             "The requested tray action is not available.",
         ),
+    }
+}
+
+fn handle_rewrite_hotkey(app: AppHandle) {
+    let state = app.state::<HotkeyRuntimeState>();
+    if state.in_flight_capture.swap(true, Ordering::SeqCst) {
+        notify(
+            &app,
+            "Rewrite already in progress",
+            "The current capture must finish before another can start.",
+        );
+        return;
+    }
+
+    thread::spawn(move || {
+        let _ = run_tauri_cli(&["selected-text-capture-started"]);
+        let payload = native_capture::capture_selected_text();
+        let payload_json = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
+
+        notify_from_cli_response(
+            &app,
+            run_tauri_cli(&["selected-text-capture-finished", payload_json.as_str()]),
+            "Selected Text capture failed safely",
+            "The capture path stopped before Azure or paste work.",
+        );
+
+        app.state::<HotkeyRuntimeState>()
+            .in_flight_capture
+            .store(false, Ordering::SeqCst);
+    });
+}
+
+fn sync_rewrite_hotkey_registration(app: &AppHandle, value: &Value) -> HotkeyRegistrationResult {
+    let _ = app.global_shortcut().unregister_all();
+
+    if !hotkey_registration_allowed(value) {
+        return HotkeyRegistrationResult::NotNeeded;
+    }
+
+    let Some(hotkey) = load_configured_hotkey() else {
+        notify_hotkey_registration_finished(app, false, "hotkey_invalid");
+        return HotkeyRegistrationResult::Failed;
+    };
+
+    match app.global_shortcut().register(hotkey.as_str()) {
+        Ok(()) => {
+            notify_hotkey_registration_finished(app, true, "");
+            HotkeyRegistrationResult::Registered
+        }
+        Err(_) => {
+            notify_hotkey_registration_finished(app, false, "hotkey_registration_conflict");
+            HotkeyRegistrationResult::Failed
+        }
+    }
+}
+
+fn hotkey_registration_allowed(value: &Value) -> bool {
+    value
+        .get("state")
+        .and_then(|state| state.get("hotkeyRegistrationAllowed"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn notify_hotkey_registration_finished(app: &AppHandle, ok: bool, category: &str) {
+    let payload = if ok {
+        serde_json::json!({ "ok": true })
+    } else {
+        serde_json::json!({ "ok": false, "category": category })
+    };
+    let payload_json = payload.to_string();
+    let response = run_tauri_cli(&["hotkey-registration-finished", payload_json.as_str()]);
+
+    if !ok {
+        notify_from_cli_response(
+            app,
+            response,
+            "Rewrite Hotkey conflict",
+            "The configured hotkey could not be registered. The app will keep running.",
+        );
     }
 }
 
@@ -154,7 +287,37 @@ fn project_root() -> PathBuf {
         .to_path_buf()
 }
 
-fn notify_from_cli_response(app: &AppHandle, value: Result<Value, ()>, fallback_title: &str, fallback_body: &str) {
+fn load_configured_hotkey() -> Option<String> {
+    let raw = std::fs::read_to_string(config_path()).ok()?;
+    let value: Value = serde_json::from_str(&raw).ok()?;
+    let hotkey = value.get("hotkey").and_then(Value::as_str)?.trim();
+
+    if hotkey.is_empty() {
+        None
+    } else {
+        Some(hotkey.to_string())
+    }
+}
+
+fn config_path() -> PathBuf {
+    let base = std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("USERPROFILE")
+                .map(PathBuf::from)
+                .map(|home| home.join("AppData").join("Roaming"))
+        })
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    base.join("Rewrite Hotkey").join("config.json")
+}
+
+fn notify_from_cli_response(
+    app: &AppHandle,
+    value: Result<Value, ()>,
+    fallback_title: &str,
+    fallback_body: &str,
+) {
     match value {
         Ok(value) => {
             let notification = value.get("outcome").unwrap_or(&value);
@@ -184,7 +347,11 @@ fn notify_startup(app: &AppHandle, value: &Value) {
         .unwrap_or(false);
 
     if !enabled {
-        notify(app, "Rewrite Hotkey disabled", "No rewrite hotkey or rewrite work will run.");
+        notify(
+            app,
+            "Rewrite Hotkey disabled",
+            "No rewrite hotkey or rewrite work will run.",
+        );
     } else if configured {
         notify(app, "Rewrite Hotkey ready", "The tray shell is running.");
     } else {
@@ -197,10 +364,5 @@ fn notify_startup(app: &AppHandle, value: &Value) {
 }
 
 fn notify(app: &AppHandle, title: &str, body: &str) {
-    let _ = app
-        .notification()
-        .builder()
-        .title(title)
-        .body(body)
-        .show();
+    let _ = app.notification().builder().title(title).body(body).show();
 }

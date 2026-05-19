@@ -61,7 +61,11 @@ Run the tray-first desktop shell:
 npm run tauri:dev
 ```
 
-The tray menu exposes enable, disable, open settings, Test Rewrite, and quit actions. The shell does not register or execute the Rewrite Hotkey unless the app is enabled and configured. Test Rewrite uses the built-in sample and logs metadata only.
+The tray menu exposes enable, disable, open settings, Test Rewrite, and quit actions. The shell registers the configured global Rewrite Hotkey only when the app is enabled and configured. Registration conflicts notify without crashing the app. Test Rewrite uses the built-in sample and logs metadata only.
+
+## Selected Text capture
+
+When the configured Rewrite Hotkey fires, the app captures the foreground Rewrite Target, snapshots the native clipboard before copy, sends copy, polls briefly for usable plain Selected Text, restores the Clipboard Snapshot, and then stops. Azure replacement and paste are intentionally not connected yet. No-selection and whitespace-only selections notify with content-free Safe Failure messages.
 
 ## Development checks
 
