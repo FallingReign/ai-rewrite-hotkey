@@ -63,9 +63,9 @@ npm run tauri:dev
 
 The tray menu exposes enable, disable, open settings, Test Rewrite, and quit actions. The shell registers the configured global Rewrite Hotkey only when the app is enabled and configured. Registration conflicts notify without crashing the app. Test Rewrite uses the built-in sample and logs metadata only.
 
-## Selected Text capture
+## Replacement Flow
 
-When the configured Rewrite Hotkey fires, the app captures the foreground Rewrite Target, snapshots the native clipboard before copy, sends copy, polls briefly for usable plain Selected Text, restores the Clipboard Snapshot, and then stops. Azure replacement and paste are intentionally not connected yet. No-selection and whitespace-only selections notify with content-free Safe Failure messages.
+When the configured Rewrite Hotkey fires, the app captures the foreground Rewrite Target, snapshots the native clipboard before copy, sends copy, polls briefly for usable plain Selected Text, sends a text-only live Azure Rewrite Request, validates plain Replacement Text, pastes it over the original selection, waits 500 ms, and restores the Clipboard Snapshot. Successful replacement is silent. No-Op Rewrite and Safe Failure outcomes notify with content-free messages.
 
 ## Development checks
 

@@ -12,7 +12,9 @@ export type MetadataEventName =
   | "test_rewrite_finished"
   | "hotkey_registration_finished"
   | "selected_text_capture_started"
-  | "selected_text_capture_finished";
+  | "selected_text_capture_finished"
+  | "replacement_flow_started"
+  | "replacement_flow_finished";
 
 export type MetadataOutcome =
   | "succeeded"
@@ -28,6 +30,8 @@ export type MetadataCategory =
   | SafeFailureCategory
   | SelectedTextCaptureFailureCategory
   | "disabled_app"
+  | "clipboard_write_failed"
+  | "paste_failed"
   | "hotkey_registration_conflict"
   | "hotkey_invalid";
 
@@ -44,11 +48,14 @@ export interface MetadataLogEvent {
   targetCaptured?: boolean;
   clipboardSnapshotCaptured?: boolean;
   copySent?: boolean;
+  pasteSent?: boolean;
   clipboardRestored?: boolean;
   selectedTextCharLength?: number;
   usableTextCharLength?: number;
   leadingWrapperLength?: number;
   trailingWrapperLength?: number;
+  replacementTextCharLength?: number;
+  pasteTextCharLength?: number;
   pollAttempts?: number;
 }
 
@@ -117,6 +124,10 @@ function sanitiseMetadataLogEvent(event: MetadataLogEvent): Record<string, unkno
     entry.copySent = event.copySent;
   }
 
+  if (event.pasteSent !== undefined) {
+    entry.pasteSent = event.pasteSent;
+  }
+
   if (event.clipboardRestored !== undefined) {
     entry.clipboardRestored = event.clipboardRestored;
   }
@@ -135,6 +146,14 @@ function sanitiseMetadataLogEvent(event: MetadataLogEvent): Record<string, unkno
 
   if (event.trailingWrapperLength !== undefined) {
     entry.trailingWrapperLength = event.trailingWrapperLength;
+  }
+
+  if (event.replacementTextCharLength !== undefined) {
+    entry.replacementTextCharLength = event.replacementTextCharLength;
+  }
+
+  if (event.pasteTextCharLength !== undefined) {
+    entry.pasteTextCharLength = event.pasteTextCharLength;
   }
 
   if (event.pollAttempts !== undefined) {

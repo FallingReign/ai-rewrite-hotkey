@@ -1,8 +1,13 @@
 use serde::Serialize;
-use std::time::Duration;
+use std::{
+    thread,
+    time::{Duration, Instant},
+};
 
 const COPY_POLL_TIMEOUT: Duration = Duration::from_millis(750);
 const COPY_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const PRE_COPY_SETTLE_DELAY: Duration = Duration::from_millis(120);
+const PASTE_RESTORE_DELAY: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -10,11 +15,14 @@ pub struct CaptureMetadata {
     pub target_captured: bool,
     pub clipboard_snapshot_captured: bool,
     pub copy_sent: bool,
+    pub paste_sent: bool,
     pub clipboard_restored: bool,
     pub selected_text_char_length: Option<usize>,
     pub usable_text_char_length: Option<usize>,
     pub leading_wrapper_length: Option<usize>,
     pub trailing_wrapper_length: Option<usize>,
+    pub replacement_text_char_length: Option<usize>,
+    pub paste_text_char_length: Option<usize>,
     pub poll_attempts: u32,
     pub duration_ms: u128,
 }
@@ -25,11 +33,14 @@ impl CaptureMetadata {
             target_captured: false,
             clipboard_snapshot_captured: false,
             copy_sent: false,
+            paste_sent: false,
             clipboard_restored: false,
             selected_text_char_length: None,
             usable_text_char_length: None,
             leading_wrapper_length: None,
             trailing_wrapper_length: None,
+            replacement_text_char_length: None,
+            paste_text_char_length: None,
             poll_attempts: 0,
             duration_ms: 0,
         }
@@ -45,13 +56,215 @@ pub struct CaptureFinishedPayload {
     pub metadata: CaptureMetadata,
 }
 
+pub enum ReplacementCaptureResult {
+    Captured(ReplacementCapture),
+    Failed(CaptureFinishedPayload),
+}
+
+pub struct ReplacementCapture {
+    pub selected_text: String,
+    pub session: ReplacementSession,
+}
+
+pub struct ReplacementSession {
+    snapshot: platform::ClipboardSnapshot,
+    metadata: CaptureMetadata,
+    started_at: Instant,
+}
+
+impl ReplacementSession {
+    pub fn restore_without_paste(self) -> CaptureFinishedPayload {
+        let mut metadata = self.metadata;
+
+        match self.snapshot.restore() {
+            Ok(()) => {
+                metadata.clipboard_restored = true;
+                success(metadata, self.started_at)
+            }
+            Err(_) => failure("clipboard_restore_failed", metadata, self.started_at),
+        }
+    }
+
+    pub fn paste_replacement_and_restore(self, paste_text: &str) -> CaptureFinishedPayload {
+        let mut metadata = self.metadata;
+        metadata.paste_text_char_length = Some(paste_text.chars().count());
+
+        let category = if platform::set_clipboard_plain_text(paste_text).is_err() {
+            Some("clipboard_write_failed")
+        } else if platform::send_paste().is_err() {
+            Some("paste_failed")
+        } else {
+            metadata.paste_sent = true;
+            thread::sleep(PASTE_RESTORE_DELAY);
+            None
+        };
+
+        match self.snapshot.restore() {
+            Ok(()) => metadata.clipboard_restored = true,
+            Err(_) => return failure("clipboard_restore_failed", metadata, self.started_at),
+        }
+
+        match category {
+            Some(category) => failure(category, metadata, self.started_at),
+            None => success(metadata, self.started_at),
+        }
+    }
+}
+
+#[allow(dead_code)]
 pub fn capture_selected_text() -> CaptureFinishedPayload {
-    platform::capture_selected_text()
+    match capture_selected_text_for_replacement() {
+        ReplacementCaptureResult::Captured(capture) => capture.session.restore_without_paste(),
+        ReplacementCaptureResult::Failed(payload) => payload,
+    }
+}
+
+pub fn capture_selected_text_for_replacement() -> ReplacementCaptureResult {
+    let started_at = Instant::now();
+    let mut metadata = CaptureMetadata::new();
+
+    if platform::capture_foreground_target().is_err() {
+        return ReplacementCaptureResult::Failed(failure(
+            "rewrite_target_unavailable",
+            metadata,
+            started_at,
+        ));
+    }
+    metadata.target_captured = true;
+
+    let snapshot = match platform::capture_clipboard_snapshot() {
+        Ok(snapshot) => {
+            metadata.clipboard_snapshot_captured = true;
+            snapshot
+        }
+        Err(_) => {
+            return ReplacementCaptureResult::Failed(failure(
+                "clipboard_snapshot_failed",
+                metadata,
+                started_at,
+            ))
+        }
+    };
+
+    thread::sleep(PRE_COPY_SETTLE_DELAY);
+
+    if platform::send_copy().is_err() {
+        return ReplacementCaptureResult::Failed(restore_then_failure(
+            snapshot,
+            metadata,
+            "copy_failed",
+            started_at,
+        ));
+    }
+    metadata.copy_sent = true;
+
+    let selected_text = match platform::poll_for_selected_text(&snapshot, &mut metadata) {
+        Some(text) => text,
+        None => {
+            return ReplacementCaptureResult::Failed(restore_then_failure(
+                snapshot,
+                metadata,
+                "selected_text_empty",
+                started_at,
+            ))
+        }
+    };
+
+    let text_metadata = match classify_selected_text(&selected_text) {
+        Some(text_metadata) => text_metadata,
+        None => {
+            return ReplacementCaptureResult::Failed(restore_then_failure(
+                snapshot,
+                metadata,
+                "selected_text_empty",
+                started_at,
+            ))
+        }
+    };
+
+    metadata.selected_text_char_length = Some(text_metadata.selected_text_char_length);
+    metadata.usable_text_char_length = Some(text_metadata.usable_text_char_length);
+    metadata.leading_wrapper_length = Some(text_metadata.leading_wrapper_length);
+    metadata.trailing_wrapper_length = Some(text_metadata.trailing_wrapper_length);
+
+    ReplacementCaptureResult::Captured(ReplacementCapture {
+        selected_text,
+        session: ReplacementSession {
+            snapshot,
+            metadata,
+            started_at,
+        },
+    })
+}
+
+fn restore_then_failure(
+    snapshot: platform::ClipboardSnapshot,
+    mut metadata: CaptureMetadata,
+    category: &'static str,
+    started_at: Instant,
+) -> CaptureFinishedPayload {
+    match snapshot.restore() {
+        Ok(()) => {
+            metadata.clipboard_restored = true;
+            failure(category, metadata, started_at)
+        }
+        Err(_) => failure("clipboard_restore_failed", metadata, started_at),
+    }
+}
+
+fn success(mut metadata: CaptureMetadata, started_at: Instant) -> CaptureFinishedPayload {
+    metadata.duration_ms = started_at.elapsed().as_millis();
+
+    CaptureFinishedPayload {
+        ok: true,
+        category: None,
+        metadata,
+    }
+}
+
+fn failure(
+    category: &'static str,
+    mut metadata: CaptureMetadata,
+    started_at: Instant,
+) -> CaptureFinishedPayload {
+    metadata.duration_ms = started_at.elapsed().as_millis();
+
+    CaptureFinishedPayload {
+        ok: false,
+        category: Some(category),
+        metadata,
+    }
+}
+
+struct ClassifiedTextMetadata {
+    selected_text_char_length: usize,
+    usable_text_char_length: usize,
+    leading_wrapper_length: usize,
+    trailing_wrapper_length: usize,
+}
+
+fn classify_selected_text(text: &str) -> Option<ClassifiedTextMetadata> {
+    if text.trim().is_empty() {
+        return None;
+    }
+
+    let trimmed_start = text.trim_start();
+    let leading_bytes = text.len() - trimmed_start.len();
+    let trimmed_end = text.trim_end();
+    let trailing_bytes = text.len() - trimmed_end.len();
+    let usable = &text[leading_bytes..text.len() - trailing_bytes];
+
+    Some(ClassifiedTextMetadata {
+        selected_text_char_length: text.chars().count(),
+        usable_text_char_length: usable.chars().count(),
+        leading_wrapper_length: text[..leading_bytes].chars().count(),
+        trailing_wrapper_length: text[text.len() - trailing_bytes..].chars().count(),
+    })
 }
 
 #[cfg(windows)]
 mod platform {
-    use super::{CaptureFinishedPayload, CaptureMetadata, COPY_POLL_INTERVAL, COPY_POLL_TIMEOUT};
+    use super::{CaptureMetadata, COPY_POLL_INTERVAL, COPY_POLL_TIMEOUT};
     use std::{
         ffi::c_void,
         mem::size_of,
@@ -79,13 +292,14 @@ mod platform {
 
     const CF_UNICODETEXT: u32 = 13;
     const VK_C: VIRTUAL_KEY = 0x43;
+    const VK_V: VIRTUAL_KEY = 0x56;
 
-    struct RewriteTarget {
+    pub(super) struct RewriteTarget {
         _hwnd: HWND,
         _process_id: u32,
     }
 
-    struct ClipboardSnapshot {
+    pub(super) struct ClipboardSnapshot {
         sequence_number: u32,
         previous_plain_text: Option<String>,
         formats: Vec<ClipboardFormatData>,
@@ -117,72 +331,7 @@ mod platform {
         }
     }
 
-    pub fn capture_selected_text() -> CaptureFinishedPayload {
-        let started_at = Instant::now();
-        let mut metadata = CaptureMetadata::new();
-
-        if capture_foreground_target().is_err() {
-            return failure("rewrite_target_unavailable", metadata, started_at);
-        }
-        metadata.target_captured = true;
-
-        let snapshot = match capture_clipboard_snapshot() {
-            Ok(snapshot) => {
-                metadata.clipboard_snapshot_captured = true;
-                snapshot
-            }
-            Err(_) => return failure("clipboard_snapshot_failed", metadata, started_at),
-        };
-
-        let mut category = None;
-        let mut captured_text_metadata = None;
-
-        thread::sleep(Duration::from_millis(120));
-
-        if send_copy().is_ok() {
-            metadata.copy_sent = true;
-
-            match poll_for_selected_text(
-                snapshot.sequence_number,
-                snapshot.previous_plain_text.as_deref(),
-                &mut metadata,
-            ) {
-                Some(text) => {
-                    if let Some(text_metadata) = classify_selected_text(&text) {
-                        captured_text_metadata = Some(text_metadata);
-                    } else {
-                        category = Some("selected_text_empty");
-                    }
-                }
-                None => category = Some("selected_text_empty"),
-            }
-        } else {
-            category = Some("copy_failed");
-        }
-
-        match snapshot.restore() {
-            Ok(()) => metadata.clipboard_restored = true,
-            Err(_) => return failure("clipboard_restore_failed", metadata, started_at),
-        }
-
-        if let Some(text_metadata) = captured_text_metadata {
-            metadata.selected_text_char_length = Some(text_metadata.selected_text_char_length);
-            metadata.usable_text_char_length = Some(text_metadata.usable_text_char_length);
-            metadata.leading_wrapper_length = Some(text_metadata.leading_wrapper_length);
-            metadata.trailing_wrapper_length = Some(text_metadata.trailing_wrapper_length);
-            metadata.duration_ms = started_at.elapsed().as_millis();
-
-            CaptureFinishedPayload {
-                ok: true,
-                category: None,
-                metadata,
-            }
-        } else {
-            failure(category.unwrap_or("unexpected_error"), metadata, started_at)
-        }
-    }
-
-    fn capture_foreground_target() -> Result<RewriteTarget, ()> {
+    pub(super) fn capture_foreground_target() -> Result<RewriteTarget, ()> {
         unsafe {
             let hwnd = GetForegroundWindow();
             if hwnd.is_null() {
@@ -199,7 +348,7 @@ mod platform {
         }
     }
 
-    fn capture_clipboard_snapshot() -> Result<ClipboardSnapshot, ()> {
+    pub(super) fn capture_clipboard_snapshot() -> Result<ClipboardSnapshot, ()> {
         with_clipboard(|| unsafe {
             let sequence_number = GetClipboardSequenceNumber();
             let mut formats = Vec::new();
@@ -233,7 +382,7 @@ mod platform {
     }
 
     impl ClipboardSnapshot {
-        fn restore(mut self) -> Result<(), ()> {
+        pub(super) fn restore(mut self) -> Result<(), ()> {
             with_clipboard(|| unsafe {
                 if EmptyClipboard() == 0 {
                     return Err(());
@@ -291,32 +440,63 @@ mod platform {
         }
     }
 
-    fn send_copy() -> Result<(), ()> {
-        let inputs = [
-            keyboard_input(VK_CONTROL, 0),
-            keyboard_input(VK_C, 0),
-            keyboard_input(VK_C, KEYEVENTF_KEYUP),
-            keyboard_input(VK_CONTROL, KEYEVENTF_KEYUP),
-        ];
+    pub(super) fn send_copy() -> Result<(), ()> {
+        send_control_shortcut(VK_C)
+    }
+
+    pub(super) fn send_paste() -> Result<(), ()> {
+        send_control_shortcut(VK_V)
+    }
+
+    pub(super) fn set_clipboard_plain_text(text: &str) -> Result<(), ()> {
+        let mut handle = unicode_text_handle(text)?;
+        let result = with_clipboard(|| unsafe {
+            if EmptyClipboard() == 0 {
+                return Err(());
+            }
+
+            if SetClipboardData(CF_UNICODETEXT, handle as HANDLE).is_null() {
+                return Err(());
+            }
+
+            handle = null_mut();
+            Ok(())
+        });
+
+        if !handle.is_null() {
+            unsafe {
+                GlobalFree(handle);
+            }
+        }
+
+        result
+    }
+
+    fn unicode_text_handle(text: &str) -> Result<HGLOBAL, ()> {
+        let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+        let size = wide.len() * size_of::<u16>();
 
         unsafe {
-            let sent = SendInput(
-                inputs.len() as u32,
-                inputs.as_ptr(),
-                size_of::<INPUT>() as i32,
-            );
-
-            if sent == inputs.len() as u32 {
-                Ok(())
-            } else {
-                Err(())
+            let handle = GlobalAlloc(GMEM_MOVEABLE, size);
+            if handle.is_null() {
+                return Err(());
             }
+
+            let destination = GlobalLock(handle);
+            if destination.is_null() {
+                GlobalFree(handle);
+                return Err(());
+            }
+
+            copy_nonoverlapping(wide.as_ptr() as *const u8, destination as *mut u8, size);
+            GlobalUnlock(handle);
+
+            Ok(handle)
         }
     }
 
-    fn poll_for_selected_text(
-        previous_sequence_number: u32,
-        previous_plain_text: Option<&str>,
+    pub(super) fn poll_for_selected_text(
+        snapshot: &ClipboardSnapshot,
         metadata: &mut CaptureMetadata,
     ) -> Option<String> {
         let started_at = Instant::now();
@@ -327,8 +507,8 @@ mod platform {
             let allow_unchanged_text = started_at.elapsed() >= Duration::from_millis(150);
 
             if let Ok(Some(text)) = read_plain_text_after_sequence(
-                previous_sequence_number,
-                previous_plain_text,
+                snapshot.sequence_number,
+                snapshot.previous_plain_text.as_deref(),
                 allow_unchanged_text,
             ) {
                 return Some(text);
@@ -393,30 +573,27 @@ mod platform {
         Ok(Some(text))
     }
 
-    struct ClassifiedTextMetadata {
-        selected_text_char_length: usize,
-        usable_text_char_length: usize,
-        leading_wrapper_length: usize,
-        trailing_wrapper_length: usize,
-    }
+    fn send_control_shortcut(key: VIRTUAL_KEY) -> Result<(), ()> {
+        let inputs = [
+            keyboard_input(VK_CONTROL, 0),
+            keyboard_input(key, 0),
+            keyboard_input(key, KEYEVENTF_KEYUP),
+            keyboard_input(VK_CONTROL, KEYEVENTF_KEYUP),
+        ];
 
-    fn classify_selected_text(text: &str) -> Option<ClassifiedTextMetadata> {
-        if text.trim().is_empty() {
-            return None;
+        unsafe {
+            let sent = SendInput(
+                inputs.len() as u32,
+                inputs.as_ptr(),
+                size_of::<INPUT>() as i32,
+            );
+
+            if sent == inputs.len() as u32 {
+                Ok(())
+            } else {
+                Err(())
+            }
         }
-
-        let trimmed_start = text.trim_start();
-        let leading_bytes = text.len() - trimmed_start.len();
-        let trimmed_end = text.trim_end();
-        let trailing_bytes = text.len() - trimmed_end.len();
-        let usable = &text[leading_bytes..text.len() - trailing_bytes];
-
-        Some(ClassifiedTextMetadata {
-            selected_text_char_length: text.chars().count(),
-            usable_text_char_length: usable.chars().count(),
-            leading_wrapper_length: text[..leading_bytes].chars().count(),
-            trailing_wrapper_length: text[text.len() - trailing_bytes..].chars().count(),
-        })
     }
 
     fn keyboard_input(vk: VIRTUAL_KEY, flags: KEYBD_EVENT_FLAGS) -> INPUT {
@@ -444,31 +621,45 @@ mod platform {
         let _guard = OpenClipboardGuard;
         operation()
     }
-
-    fn failure(
-        category: &'static str,
-        mut metadata: CaptureMetadata,
-        started_at: Instant,
-    ) -> CaptureFinishedPayload {
-        metadata.duration_ms = started_at.elapsed().as_millis();
-
-        CaptureFinishedPayload {
-            ok: false,
-            category: Some(category),
-            metadata,
-        }
-    }
 }
 
 #[cfg(not(windows))]
 mod platform {
-    use super::{CaptureFinishedPayload, CaptureMetadata};
+    use super::CaptureMetadata;
 
-    pub fn capture_selected_text() -> CaptureFinishedPayload {
-        CaptureFinishedPayload {
-            ok: false,
-            category: Some("unexpected_error"),
-            metadata: CaptureMetadata::new(),
+    pub(super) struct RewriteTarget;
+    pub(super) struct ClipboardSnapshot;
+
+    impl ClipboardSnapshot {
+        pub(super) fn restore(self) -> Result<(), ()> {
+            Err(())
         }
+    }
+
+    pub(super) fn capture_foreground_target() -> Result<RewriteTarget, ()> {
+        Err(())
+    }
+
+    pub(super) fn capture_clipboard_snapshot() -> Result<ClipboardSnapshot, ()> {
+        Err(())
+    }
+
+    pub(super) fn send_copy() -> Result<(), ()> {
+        Err(())
+    }
+
+    pub(super) fn send_paste() -> Result<(), ()> {
+        Err(())
+    }
+
+    pub(super) fn set_clipboard_plain_text(_text: &str) -> Result<(), ()> {
+        Err(())
+    }
+
+    pub(super) fn poll_for_selected_text(
+        _snapshot: &ClipboardSnapshot,
+        _metadata: &mut CaptureMetadata,
+    ) -> Option<String> {
+        None
     }
 }

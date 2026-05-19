@@ -1,7 +1,15 @@
 import { spawn } from "node:child_process";
 import { ensureConfigFile, loadConfig, saveConfig } from "../config/config.js";
 import { deriveRewriteAppState, deriveTrayMenuModel, withEnabled } from "./app-state.js";
-import { appendMetadataLogEvent, type MetadataCategory, type MetadataLogEvent } from "./metadata-log.js";
+import {
+  appendMetadataLogEvent,
+  statusClassForHttpStatus,
+  type MetadataCategory,
+  type MetadataLogEvent,
+  type MetadataOutcome,
+  type ProviderStatusClass
+} from "./metadata-log.js";
+import { planReplacementFlowRewrite } from "./replacement-flow.js";
 import { runSafeTestRewrite } from "./test-rewrite.js";
 
 const command = process.argv[2] ?? "status";
@@ -49,6 +57,15 @@ async function main(): Promise<void> {
       return;
     case "selected-text-capture-finished":
       printJson(selectedTextCaptureFinishedResponse(parseJsonArgument(process.argv[3])));
+      return;
+    case "replacement-flow-started":
+      printJson(replacementFlowStartedResponse());
+      return;
+    case "replacement-flow-rewrite":
+      printJson(await replacementFlowRewriteResponse());
+      return;
+    case "replacement-flow-finished":
+      printJson(replacementFlowFinishedResponse(parseJsonArgument(process.argv[3])));
       return;
     default:
       printJson({
@@ -172,6 +189,67 @@ function selectedTextCaptureFinishedResponse(payload: unknown): Record<string, u
   };
 }
 
+function replacementFlowStartedResponse(): Record<string, unknown> {
+  const state = deriveRewriteAppState(loadConfig());
+  appendMetadataLogEvent({
+    event: "replacement_flow_started",
+    configured: state.configured,
+    enabled: state.enabled,
+    hotkeyRegistrationAllowed: state.hotkeyRegistrationAllowed
+  });
+
+  return {
+    ok: true,
+    kind: "replacement_flow_started",
+    silent: true
+  };
+}
+
+async function replacementFlowRewriteResponse(): Promise<unknown> {
+  if (process.env.REWRITE_HOTKEY_PRIVATE_PIPE !== "1") {
+    return {
+      ok: false,
+      action: "restore",
+      code: "replacement_flow_safe_failure",
+      category: "unexpected_error",
+      metadata: {},
+      notificationTitle: "Rewrite failed safely",
+      notificationBody: "The private rewrite pipe was unavailable, so no paste work was started."
+    };
+  }
+
+  const selectedText = await readStdin();
+
+  return planReplacementFlowRewrite({
+    config: loadConfig(),
+    selectedText
+  });
+}
+
+function replacementFlowFinishedResponse(payload: unknown): Record<string, unknown> {
+  const event = replacementFlowFinishedEvent(payload);
+  appendMetadataLogEvent(event);
+
+  if (event.outcome === "succeeded") {
+    return {
+      ok: true,
+      kind: "replacement_flow_finished",
+      silent: true
+    };
+  }
+
+  const notification = replacementFlowNotification(event);
+
+  return {
+    ok: event.outcome === "noop",
+    kind: "replacement_flow_finished",
+    notificationTitle: notification.title,
+    notificationBody: notification.body,
+    category: event.category,
+    providerStatusClass: event.providerStatusClass
+  };
+}
+
 function parseEnabledArgument(value: string | undefined): boolean {
   if (value === "true") {
     return true;
@@ -190,6 +268,16 @@ function parseJsonArgument(value: string | undefined): unknown {
   }
 
   return JSON.parse(value);
+}
+
+async function readStdin(): Promise<string> {
+  const chunks: Buffer[] = [];
+
+  for await (const chunk of process.stdin) {
+    chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+  }
+
+  return Buffer.concat(chunks).toString("utf8");
 }
 
 function hotkeyRegistrationEvent(payload: unknown): MetadataLogEvent {
@@ -217,26 +305,99 @@ function selectedTextCaptureEvent(payload: unknown): MetadataLogEvent {
     targetCaptured: asBoolean(metadata.targetCaptured),
     clipboardSnapshotCaptured: asBoolean(metadata.clipboardSnapshotCaptured),
     copySent: asBoolean(metadata.copySent),
+    pasteSent: asBoolean(metadata.pasteSent),
     clipboardRestored: asBoolean(metadata.clipboardRestored),
     selectedTextCharLength: asNumber(metadata.selectedTextCharLength),
     usableTextCharLength: asNumber(metadata.usableTextCharLength),
     leadingWrapperLength: asNumber(metadata.leadingWrapperLength),
     trailingWrapperLength: asNumber(metadata.trailingWrapperLength),
+    replacementTextCharLength: asNumber(metadata.replacementTextCharLength),
+    pasteTextCharLength: asNumber(metadata.pasteTextCharLength),
     pollAttempts: asNumber(metadata.pollAttempts),
     durationMs: asNumber(metadata.durationMs)
   };
 }
 
+function replacementFlowFinishedEvent(payload: unknown): MetadataLogEvent {
+  const object = asRecord(payload);
+  const metadata = asRecord(object.metadata);
+  const outcome = replacementFlowOutcomeFrom(object.outcome, object.ok);
+  const category = metadataCategoryFrom(object.category);
+
+  return {
+    event: "replacement_flow_finished",
+    outcome,
+    category: outcome === "safe_failure" ? category : undefined,
+    providerStatusClass: providerStatusClassFrom(object.providerStatusClass),
+    targetCaptured: asBoolean(metadata.targetCaptured),
+    clipboardSnapshotCaptured: asBoolean(metadata.clipboardSnapshotCaptured),
+    copySent: asBoolean(metadata.copySent),
+    pasteSent: asBoolean(metadata.pasteSent),
+    clipboardRestored: asBoolean(metadata.clipboardRestored),
+    selectedTextCharLength: asNumber(metadata.selectedTextCharLength),
+    usableTextCharLength: asNumber(metadata.usableTextCharLength),
+    leadingWrapperLength: asNumber(metadata.leadingWrapperLength),
+    trailingWrapperLength: asNumber(metadata.trailingWrapperLength),
+    replacementTextCharLength: asNumber(metadata.replacementTextCharLength),
+    pasteTextCharLength: asNumber(metadata.pasteTextCharLength),
+    pollAttempts: asNumber(metadata.pollAttempts),
+    durationMs: asNumber(metadata.durationMs)
+  };
+}
+
+function replacementFlowOutcomeFrom(value: unknown, ok: unknown): MetadataOutcome {
+  switch (value) {
+    case "succeeded":
+      return "succeeded";
+    case "noop":
+      return "noop";
+    case "safe_failure":
+      return "safe_failure";
+    default:
+      return ok === true ? "succeeded" : "safe_failure";
+  }
+}
+
 function metadataCategoryFrom(value: unknown): MetadataCategory | undefined {
   switch (value) {
+    case "config_invalid":
+    case "selected_text_empty":
+    case "selected_text_too_large":
+    case "style_prompt_empty":
+    case "style_prompt_too_large":
+    case "payload_too_large":
+    case "azure_timeout":
+    case "azure_network_error":
+    case "azure_http_error":
+    case "azure_malformed_response":
+    case "model_empty_output":
+    case "model_explanatory_output":
+    case "model_metadata_output":
+    case "model_ambiguous_output":
+    case "unexpected_error":
     case "disabled_app":
     case "configuration_required":
     case "rewrite_target_unavailable":
     case "clipboard_snapshot_failed":
     case "copy_failed":
-    case "selected_text_empty":
     case "clipboard_restore_failed":
-    case "unexpected_error":
+    case "clipboard_write_failed":
+    case "paste_failed":
+    case "hotkey_registration_conflict":
+    case "hotkey_invalid":
+      return value;
+    default:
+      return undefined;
+  }
+}
+
+function providerStatusClassFrom(value: unknown): ProviderStatusClass | undefined {
+  switch (value) {
+    case "1xx":
+    case "2xx":
+    case "3xx":
+    case "4xx":
+    case "5xx":
       return value;
     default:
       return undefined;
@@ -281,6 +442,71 @@ function selectedTextCaptureNotification(event: MetadataLogEvent): { title: stri
       return {
         title: "Selected Text capture failed safely",
         body: "The capture path stopped before Azure or paste work."
+      };
+  }
+}
+
+function replacementFlowNotification(event: MetadataLogEvent): { title: string; body: string } {
+  if (event.outcome === "noop") {
+    return {
+      title: "No changes suggested",
+      body: "No change was suggested, so the original selection was left untouched."
+    };
+  }
+
+  switch (event.category) {
+    case "selected_text_empty":
+      return {
+        title: "No Selected Text captured",
+        body: "Select usable text before pressing Rewrite Hotkey."
+      };
+    case "clipboard_snapshot_failed":
+      return {
+        title: "Rewrite failed safely",
+        body: "The clipboard could not be snapshotted, so copy was not sent."
+      };
+    case "clipboard_restore_failed":
+      return {
+        title: "Clipboard restore failed",
+        body: "The Clipboard Snapshot could not be restored."
+      };
+    case "clipboard_write_failed":
+      return {
+        title: "Rewrite failed safely",
+        body: "Replacement Text could not be placed on the clipboard. Original selection and clipboard were restored where possible."
+      };
+    case "paste_failed":
+      return {
+        title: "Rewrite failed safely",
+        body: "Replacement Text could not be pasted. Original selection and clipboard were restored where possible."
+      };
+    case "config_invalid":
+    case "style_prompt_empty":
+    case "style_prompt_too_large":
+      return {
+        title: "Rewrite Hotkey settings issue",
+        body: "Check Settings. Original selection and clipboard were restored where possible."
+      };
+    case "azure_timeout":
+    case "azure_network_error":
+    case "azure_http_error":
+    case "azure_malformed_response":
+      return {
+        title: "Rewrite failed safely",
+        body: "Azure did not return valid Replacement Text. Original selection and clipboard were restored where possible."
+      };
+    case "model_empty_output":
+    case "model_explanatory_output":
+    case "model_metadata_output":
+    case "model_ambiguous_output":
+      return {
+        title: "Rewrite failed safely",
+        body: "The model output was not valid Replacement Text. Original selection and clipboard were restored where possible."
+      };
+    default:
+      return {
+        title: "Rewrite failed safely",
+        body: "The Replacement Flow stopped before paste. Original selection and clipboard were restored where possible."
       };
   }
 }

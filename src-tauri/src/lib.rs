@@ -1,5 +1,6 @@
 use serde_json::Value;
 use std::{
+    io::Write,
     path::PathBuf,
     process::{Command, Stdio},
     sync::atomic::{AtomicBool, Ordering},
@@ -178,22 +179,57 @@ fn handle_rewrite_hotkey(app: AppHandle) {
         notify(
             &app,
             "Rewrite already in progress",
-            "The current capture must finish before another can start.",
+            "The current rewrite must finish before another can start.",
         );
         return;
     }
 
     thread::spawn(move || {
-        let _ = run_tauri_cli(&["selected-text-capture-started"]);
-        let payload = native_capture::capture_selected_text();
-        let payload_json = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
+        let _ = run_tauri_cli(&["replacement-flow-started"]);
 
-        notify_from_cli_response(
-            &app,
-            run_tauri_cli(&["selected-text-capture-finished", payload_json.as_str()]),
-            "Selected Text capture failed safely",
-            "The capture path stopped before Azure or paste work.",
-        );
+        match native_capture::capture_selected_text_for_replacement() {
+            native_capture::ReplacementCaptureResult::Captured(capture) => {
+                let native_capture::ReplacementCapture {
+                    selected_text,
+                    session,
+                } = capture;
+
+                match run_tauri_cli_with_stdin(&["replacement-flow-rewrite"], &selected_text) {
+                    Ok(plan) => finish_replacement_flow_from_plan(&app, plan, session),
+                    Err(_) => {
+                        let native_payload = session.restore_without_paste();
+                        let category = if native_payload.ok {
+                            Some("unexpected_error".to_string())
+                        } else {
+                            native_payload.category.map(str::to_string)
+                        };
+                        notify_replacement_flow_finished(
+                            &app,
+                            replacement_flow_finished_payload(
+                                "safe_failure",
+                                category,
+                                None,
+                                native_payload,
+                                None,
+                            ),
+                        );
+                    }
+                }
+            }
+            native_capture::ReplacementCaptureResult::Failed(native_payload) => {
+                let category = native_payload.category.map(str::to_string);
+                notify_replacement_flow_finished(
+                    &app,
+                    replacement_flow_finished_payload(
+                        "safe_failure",
+                        category,
+                        None,
+                        native_payload,
+                        None,
+                    ),
+                );
+            }
+        }
 
         app.state::<HotkeyRuntimeState>()
             .in_flight_capture
@@ -252,6 +288,169 @@ fn notify_hotkey_registration_finished(app: &AppHandle, ok: bool, category: &str
     }
 }
 
+fn finish_replacement_flow_from_plan(
+    app: &AppHandle,
+    plan: Value,
+    session: native_capture::ReplacementSession,
+) {
+    let provider_status_class = plan
+        .get("providerStatusClass")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+
+    match plan.get("action").and_then(Value::as_str) {
+        Some("paste") => {
+            let Some(paste_text) = plan.get("pasteText").and_then(Value::as_str) else {
+                let native_payload = session.restore_without_paste();
+                let category = if native_payload.ok {
+                    Some("unexpected_error".to_string())
+                } else {
+                    native_payload.category.map(str::to_string)
+                };
+                notify_replacement_flow_finished(
+                    app,
+                    replacement_flow_finished_payload(
+                        "safe_failure",
+                        category,
+                        provider_status_class,
+                        native_payload,
+                        Some(&plan),
+                    ),
+                );
+                return;
+            };
+
+            let native_payload = session.paste_replacement_and_restore(paste_text);
+            let outcome = if native_payload.ok {
+                "succeeded"
+            } else {
+                "safe_failure"
+            };
+            let category = native_payload.category.map(str::to_string);
+            notify_replacement_flow_finished(
+                app,
+                replacement_flow_finished_payload(
+                    outcome,
+                    category,
+                    provider_status_class,
+                    native_payload,
+                    Some(&plan),
+                ),
+            );
+        }
+        Some("noop") => {
+            let native_payload = session.restore_without_paste();
+            let (outcome, category) = if native_payload.ok {
+                ("noop", None)
+            } else {
+                ("safe_failure", native_payload.category.map(str::to_string))
+            };
+            notify_replacement_flow_finished(
+                app,
+                replacement_flow_finished_payload(
+                    outcome,
+                    category,
+                    provider_status_class,
+                    native_payload,
+                    Some(&plan),
+                ),
+            );
+        }
+        Some("restore") => {
+            let plan_category = plan
+                .get("category")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .or_else(|| Some("unexpected_error".to_string()));
+            let native_payload = session.restore_without_paste();
+            let category = if native_payload.ok {
+                plan_category
+            } else {
+                native_payload.category.map(str::to_string)
+            };
+            notify_replacement_flow_finished(
+                app,
+                replacement_flow_finished_payload(
+                    "safe_failure",
+                    category,
+                    provider_status_class,
+                    native_payload,
+                    Some(&plan),
+                ),
+            );
+        }
+        _ => {
+            let native_payload = session.restore_without_paste();
+            let category = if native_payload.ok {
+                Some("unexpected_error".to_string())
+            } else {
+                native_payload.category.map(str::to_string)
+            };
+            notify_replacement_flow_finished(
+                app,
+                replacement_flow_finished_payload(
+                    "safe_failure",
+                    category,
+                    provider_status_class,
+                    native_payload,
+                    Some(&plan),
+                ),
+            );
+        }
+    }
+}
+
+fn replacement_flow_finished_payload(
+    outcome: &str,
+    category: Option<String>,
+    provider_status_class: Option<String>,
+    native_payload: native_capture::CaptureFinishedPayload,
+    plan: Option<&Value>,
+) -> Value {
+    let mut metadata =
+        serde_json::to_value(native_payload.metadata).unwrap_or_else(|_| serde_json::json!({}));
+
+    if let (Some(metadata_object), Some(plan_metadata)) = (
+        metadata.as_object_mut(),
+        plan.and_then(|value| value.get("metadata"))
+            .and_then(Value::as_object),
+    ) {
+        for key in ["replacementTextCharLength", "pasteTextCharLength"] {
+            if let Some(value) = plan_metadata.get(key) {
+                metadata_object.insert(key.to_string(), value.clone());
+            }
+        }
+    }
+
+    serde_json::json!({
+        "ok": outcome != "safe_failure",
+        "outcome": outcome,
+        "category": category,
+        "providerStatusClass": provider_status_class,
+        "metadata": metadata
+    })
+}
+
+fn notify_replacement_flow_finished(app: &AppHandle, payload: Value) {
+    let silent_success = payload
+        .get("outcome")
+        .and_then(Value::as_str)
+        .is_some_and(|outcome| outcome == "succeeded");
+    let payload_json = payload.to_string();
+    let response = run_tauri_cli(&["replacement-flow-finished", payload_json.as_str()]);
+
+    if silent_success {
+        return;
+    }
+
+    notify_from_cli_response(
+        app,
+        response,
+        "Rewrite failed safely",
+        "The Replacement Flow stopped before paste. Original selection and clipboard were restored where possible.",
+    );
+}
+
 fn run_tauri_cli(args: &[&str]) -> Result<Value, ()> {
     let mut command = Command::new(npm_command());
     command
@@ -268,6 +467,34 @@ fn run_tauri_cli(args: &[&str]) -> Result<Value, ()> {
     command.creation_flags(CREATE_NO_WINDOW);
 
     let output = command.output().map_err(|_| ())?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    serde_json::from_str(stdout.trim()).map_err(|_| ())
+}
+
+fn run_tauri_cli_with_stdin(args: &[&str], stdin_text: &str) -> Result<Value, ()> {
+    let mut command = Command::new(npm_command());
+    command
+        .current_dir(project_root())
+        .arg("run")
+        .arg("--silent")
+        .arg("app:tauri")
+        .arg("--")
+        .args(args)
+        .env("REWRITE_HOTKEY_PRIVATE_PIPE", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+
+    let mut child = command.spawn().map_err(|_| ())?;
+    if let Some(stdin) = child.stdin.as_mut() {
+        stdin.write_all(stdin_text.as_bytes()).map_err(|_| ())?;
+    }
+    drop(child.stdin.take());
+
+    let output = child.wait_with_output().map_err(|_| ())?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     serde_json::from_str(stdout.trim()).map_err(|_| ())
 }
@@ -320,6 +547,14 @@ fn notify_from_cli_response(
 ) {
     match value {
         Ok(value) => {
+            if value
+                .get("silent")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                return;
+            }
+
             let notification = value.get("outcome").unwrap_or(&value);
             let title = notification
                 .get("notificationTitle")
