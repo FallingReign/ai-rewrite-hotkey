@@ -16,7 +16,7 @@ test("default config is intentionally not configured until Azure values are fill
 test("validates the live configuration fields required for a Configured App", () => {
   const config = {
     ...DEFAULT_CONFIG,
-    azureOpenAIEndpoint: "https://rewrite-test.openai.azure.com",
+    azureOpenAIEndpoint: "https://rewrite-test.cognitiveservices.azure.com",
     azureOpenAIApiKey: "test-key",
     azureOpenAIDeployment: "gpt-test",
     azureOpenAIApiVersion: "2025-01-01-preview"
@@ -55,12 +55,12 @@ test("redacts API key without removing other visible settings", () => {
 
 test("normalises partial config with safe defaults", () => {
   const config = normaliseConfig({
-    azureOpenAIEndpoint: "https://rewrite-test.openai.azure.com",
+    azureOpenAIEndpoint: "https://rewrite-test.cognitiveservices.azure.com",
     timeoutMs: 45000,
     enabled: false
   });
 
-  assert.equal(config.azureOpenAIEndpoint, "https://rewrite-test.openai.azure.com");
+  assert.equal(config.azureOpenAIEndpoint, "https://rewrite-test.cognitiveservices.azure.com");
   assert.equal(config.timeoutMs, 45000);
   assert.equal(config.enabled, false);
   assert.equal(config.hotkey, DEFAULT_CONFIG.hotkey);

@@ -75,7 +75,7 @@ export function validateConfig(config: RewriteHotkeyConfig): ConfigValidationRes
   if (!isUsableAzureEndpoint(config.azureOpenAIEndpoint)) {
     issues.push({
       field: "azureOpenAIEndpoint",
-      message: "Azure OpenAI endpoint must be a real https://*.openai.azure.com URL."
+      message: "Azure OpenAI endpoint must be a real HTTPS URL."
     });
   }
 
@@ -129,7 +129,7 @@ function isUsableAzureEndpoint(endpoint: string): boolean {
 
   try {
     const url = new URL(endpoint);
-    return url.protocol === "https:" && url.hostname.endsWith(".openai.azure.com");
+    return url.protocol === "https:" && url.hostname.length > 0;
   } catch {
     return false;
   }
