@@ -19,7 +19,7 @@ Environment: Windows CLI session in a shared desktop context. Foreground GUI aut
 
 | Target | Availability | Smoke result |
 | --- | --- | --- |
-| Notepad | `notepad.exe` present | Skipped: foreground GUI automation unavailable in the shared CLI session. |
+| Notepad | `notepad.exe` present | Passed in HITL follow-up: selected text was replaced after the native Clipboard Snapshot fix in commit `eada9c3`. |
 | Browser text field | Edge, Chrome, and Firefox commands not found | Skipped: no browser command detected. |
 | Slack | command not found | Skipped: app unavailable. |
 | Teams | command not found | Skipped: app unavailable. |
@@ -30,7 +30,7 @@ Environment: Windows CLI session in a shared desktop context. Foreground GUI aut
 
 | Behaviour | Coverage |
 | --- | --- |
-| Successful replacement | Covered by automated Replacement Flow tests and Tauri build. GUI paste into Notepad/browser was skipped for environment safety. |
+| Successful replacement | Covered by automated Replacement Flow tests and HITL Notepad replacement after commit `eada9c3`. Browser GUI paste remains skipped because no browser command was detected. |
 | Clipboard restoration | Covered by native-flow tests for no-op, safe failure, cancellation, target change, and metadata logging. |
 | No-selection notification | Covered by Selected Text capture tests and Replacement Flow notification mapping. |
 | Timeout cancellation | Covered by fake-timer test that aborts Azure work and prevents late paste. |
@@ -43,3 +43,7 @@ Environment: Windows CLI session in a shared desktop context. Foreground GUI aut
 ## Secrets and local files
 
 No local config file, metadata log, screenshot, API key, Selected Text, Replacement Text, or provider payload was added to the repository. Local Azure config remains under `%APPDATA%\Rewrite Hotkey`.
+
+## Follow-up runtime diagnosis
+
+An initial HITL Notepad run produced no visible replacement. Metadata logs showed the hotkey fired but failed at `clipboard_snapshot_failed`, then later discarded slow screenshot rewrites with `rewrite_target_changed`. The runtime fix in commit `eada9c3` made native Clipboard Snapshot tolerant of unsupported existing clipboard formats and added debug-only `[rewrite-hotkey-dev]` terminal logs. A subsequent Notepad retest with Screenshot Context off and a 10-second timeout replaced the selected text successfully.
