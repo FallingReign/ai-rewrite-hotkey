@@ -2,6 +2,14 @@
 
 Rewrite Hotkey is a Windows utility for rewriting explicit **Selected Text** in-place through a global **Rewrite Hotkey**.
 
+Product and prototype docs:
+
+- [Personal Prototype setup and usage](docs/personal-prototype.md)
+- [V0 smoke validation](docs/smoke-validation.md)
+- [Product glossary](CONTEXT.md)
+- [Architecture decisions](docs/adr)
+- [PRD issue](https://github.com/FallingReign/ai-rewrite-hotkey/issues/1)
+
 ## Local configuration
 
 The Personal Prototype stores local configuration outside this repository:
