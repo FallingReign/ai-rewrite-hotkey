@@ -1,3 +1,5 @@
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use image::{codecs::jpeg::JpegEncoder, imageops::FilterType, DynamicImage, RgbImage};
 use serde::Serialize;
 use std::{
     thread,
@@ -8,6 +10,9 @@ const COPY_POLL_TIMEOUT: Duration = Duration::from_millis(750);
 const COPY_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const PRE_COPY_SETTLE_DELAY: Duration = Duration::from_millis(120);
 const PASTE_RESTORE_DELAY: Duration = Duration::from_millis(500);
+const SCREENSHOT_CONTEXT_MAX_LONG_EDGE: u32 = 1280;
+const SCREENSHOT_CONTEXT_IMAGE_MAX_BYTES: usize = 512 * 1024;
+const SCREENSHOT_CONTEXT_JPEG_QUALITIES: [u8; 4] = [72, 60, 50, 42];
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -56,6 +61,17 @@ pub struct CaptureFinishedPayload {
     pub metadata: CaptureMetadata,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenshotContextImage {
+    pub ok: bool,
+    pub media_type: &'static str,
+    pub base64: String,
+    pub byte_length: usize,
+    pub width: u32,
+    pub height: u32,
+}
+
 pub enum ReplacementCaptureResult {
     Captured(ReplacementCapture),
     Failed(CaptureFinishedPayload),
@@ -71,6 +87,12 @@ pub struct ReplacementSession {
     snapshot: platform::ClipboardSnapshot,
     metadata: CaptureMetadata,
     started_at: Instant,
+}
+
+struct ScreenshotBitmap {
+    width: u32,
+    height: u32,
+    rgb: Vec<u8>,
 }
 
 impl ReplacementSession {
@@ -204,6 +226,60 @@ pub fn capture_selected_text_for_replacement() -> ReplacementCaptureResult {
     })
 }
 
+pub fn capture_screenshot_context() -> Result<ScreenshotContextImage, &'static str> {
+    let bitmap = platform::capture_full_screen_bitmap().map_err(|_| "screenshot_capture_failed")?;
+    encode_screenshot_context(bitmap).map_err(|_| "screenshot_processing_failed")
+}
+
+fn encode_screenshot_context(bitmap: ScreenshotBitmap) -> Result<ScreenshotContextImage, ()> {
+    let image = RgbImage::from_raw(bitmap.width, bitmap.height, bitmap.rgb).ok_or(())?;
+    let mut image = DynamicImage::ImageRgb8(image);
+    image = resize_to_long_edge(image, SCREENSHOT_CONTEXT_MAX_LONG_EDGE);
+
+    let mut encoded = Vec::new();
+    for (index, quality) in SCREENSHOT_CONTEXT_JPEG_QUALITIES.iter().enumerate() {
+        encoded.clear();
+        {
+            let mut encoder = JpegEncoder::new_with_quality(&mut encoded, *quality);
+            encoder.encode_image(&image).map_err(|_| ())?;
+        }
+
+        if encoded.len() <= SCREENSHOT_CONTEXT_IMAGE_MAX_BYTES
+            || index == SCREENSHOT_CONTEXT_JPEG_QUALITIES.len() - 1
+        {
+            break;
+        }
+
+        let next_long_edge = ((image.width().max(image.height()) as f32) * 0.82) as u32;
+        image = resize_to_long_edge(image, next_long_edge);
+    }
+
+    let width = image.width();
+    let height = image.height();
+    let bytes = encoded;
+
+    Ok(ScreenshotContextImage {
+        ok: true,
+        media_type: "image/jpeg",
+        base64: BASE64_STANDARD.encode(&bytes),
+        byte_length: bytes.len(),
+        width,
+        height,
+    })
+}
+
+fn resize_to_long_edge(image: DynamicImage, max_long_edge: u32) -> DynamicImage {
+    let long_edge = image.width().max(image.height());
+    if long_edge <= max_long_edge || max_long_edge == 0 {
+        return image;
+    }
+
+    let scale = max_long_edge as f32 / long_edge as f32;
+    let width = ((image.width() as f32) * scale).max(1.0).round() as u32;
+    let height = ((image.height() as f32) * scale).max(1.0).round() as u32;
+    image.resize(width, height, FilterType::Triangle)
+}
+
 fn restore_then_failure(
     snapshot: platform::ClipboardSnapshot,
     mut metadata: CaptureMetadata,
@@ -271,16 +347,21 @@ fn classify_selected_text(text: &str) -> Option<ClassifiedTextMetadata> {
 
 #[cfg(windows)]
 mod platform {
-    use super::{CaptureMetadata, COPY_POLL_INTERVAL, COPY_POLL_TIMEOUT};
+    use super::{CaptureMetadata, ScreenshotBitmap, COPY_POLL_INTERVAL, COPY_POLL_TIMEOUT};
     use std::{
         ffi::c_void,
-        mem::size_of,
+        mem::{size_of, zeroed},
         ptr::{copy_nonoverlapping, null_mut},
         slice, thread,
         time::{Duration, Instant},
     };
     use windows_sys::Win32::{
         Foundation::{GlobalFree, HANDLE, HGLOBAL, HWND},
+        Graphics::Gdi::{
+            BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC,
+            GetDIBits, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
+            DIB_RGB_COLORS, HBITMAP, HDC, HGDIOBJ, SRCCOPY,
+        },
         System::{
             DataExchange::{
                 CloseClipboard, EmptyClipboard, EnumClipboardFormats, GetClipboardData,
@@ -293,7 +374,10 @@ mod platform {
                 SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
                 KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_CONTROL,
             },
-            WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId},
+            WindowsAndMessaging::{
+                GetForegroundWindow, GetSystemMetrics, GetWindowThreadProcessId,
+                SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+            },
         },
     };
 
@@ -540,6 +624,115 @@ mod platform {
         }
     }
 
+    pub(super) fn capture_full_screen_bitmap() -> Result<ScreenshotBitmap, ()> {
+        unsafe {
+            let x = GetSystemMetrics(SM_XVIRTUALSCREEN);
+            let y = GetSystemMetrics(SM_YVIRTUALSCREEN);
+            let width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+            let height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+
+            if width <= 0 || height <= 0 {
+                return Err(());
+            }
+
+            let screen_dc = GetDC(null_mut());
+            if screen_dc.is_null() {
+                return Err(());
+            }
+
+            let result = capture_from_screen_dc(screen_dc, x, y, width, height);
+            ReleaseDC(null_mut(), screen_dc);
+            result
+        }
+    }
+
+    unsafe fn capture_from_screen_dc(
+        screen_dc: HDC,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+    ) -> Result<ScreenshotBitmap, ()> {
+        let memory_dc = CreateCompatibleDC(screen_dc);
+        if memory_dc.is_null() {
+            return Err(());
+        }
+
+        let bitmap = CreateCompatibleBitmap(screen_dc, width, height);
+        if bitmap.is_null() {
+            DeleteDC(memory_dc);
+            return Err(());
+        }
+
+        let old_object = SelectObject(memory_dc, bitmap as HGDIOBJ);
+        if old_object.is_null() {
+            DeleteObject(bitmap as HGDIOBJ);
+            DeleteDC(memory_dc);
+            return Err(());
+        }
+
+        let capture_result =
+            if BitBlt(memory_dc, 0, 0, width, height, screen_dc, x, y, SRCCOPY) == 0 {
+                Err(())
+            } else {
+                read_bitmap_pixels(memory_dc, bitmap, width, height)
+            };
+
+        SelectObject(memory_dc, old_object);
+        DeleteObject(bitmap as HGDIOBJ);
+        DeleteDC(memory_dc);
+
+        capture_result
+    }
+
+    unsafe fn read_bitmap_pixels(
+        memory_dc: HDC,
+        bitmap: HBITMAP,
+        width: i32,
+        height: i32,
+    ) -> Result<ScreenshotBitmap, ()> {
+        let mut bitmap_info: BITMAPINFO = zeroed();
+        bitmap_info.bmiHeader = BITMAPINFOHEADER {
+            biSize: size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: width,
+            biHeight: -height,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB,
+            ..zeroed()
+        };
+
+        let pixel_count = (width as usize).checked_mul(height as usize).ok_or(())?;
+        let mut bgra = vec![0_u8; pixel_count.checked_mul(4).ok_or(())?];
+
+        let rows = GetDIBits(
+            memory_dc,
+            bitmap,
+            0,
+            height as u32,
+            bgra.as_mut_ptr() as *mut c_void,
+            &mut bitmap_info,
+            DIB_RGB_COLORS,
+        );
+
+        if rows == 0 {
+            return Err(());
+        }
+
+        let mut rgb = Vec::with_capacity(pixel_count.checked_mul(3).ok_or(())?);
+        for pixel in bgra.chunks_exact(4) {
+            rgb.push(pixel[2]);
+            rgb.push(pixel[1]);
+            rgb.push(pixel[0]);
+        }
+
+        Ok(ScreenshotBitmap {
+            width: width as u32,
+            height: height as u32,
+            rgb,
+        })
+    }
+
     fn read_plain_text_after_sequence(
         previous_sequence_number: u32,
         previous_plain_text: Option<&str>,
@@ -643,7 +836,7 @@ mod platform {
 
 #[cfg(not(windows))]
 mod platform {
-    use super::CaptureMetadata;
+    use super::{CaptureMetadata, ScreenshotBitmap};
 
     pub(super) struct RewriteTarget;
     pub(super) struct ClipboardSnapshot;
@@ -683,5 +876,9 @@ mod platform {
         _metadata: &mut CaptureMetadata,
     ) -> Option<String> {
         None
+    }
+
+    pub(super) fn capture_full_screen_bitmap() -> Result<ScreenshotBitmap, ()> {
+        Err(())
     }
 }

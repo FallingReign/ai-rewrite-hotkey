@@ -11,6 +11,12 @@ import {
 } from "./metadata-log.js";
 import { planReplacementFlowRewrite } from "./replacement-flow.js";
 import { runSafeTestRewrite } from "./test-rewrite.js";
+import type {
+  ScreenshotContextDegradationCategory,
+  ScreenshotContextInput,
+  ScreenshotContextMediaType,
+  ScreenshotPayloadSizeClass
+} from "../screenshot/screenshot-context.js";
 
 const command = process.argv[2] ?? "status";
 
@@ -218,11 +224,12 @@ async function replacementFlowRewriteResponse(): Promise<unknown> {
     };
   }
 
-  const selectedText = await readStdin();
+  const input = await readPrivateRewriteInput();
 
   return planReplacementFlowRewrite({
     config: loadConfig(),
-    selectedText
+    selectedText: input.selectedText,
+    screenshotContext: input.screenshotContext
   });
 }
 
@@ -230,7 +237,7 @@ function replacementFlowFinishedResponse(payload: unknown): Record<string, unkno
   const event = replacementFlowFinishedEvent(payload);
   appendMetadataLogEvent(event);
 
-  if (event.outcome === "succeeded") {
+  if (event.outcome === "succeeded" && event.screenshotContextDegraded !== true) {
     return {
       ok: true,
       kind: "replacement_flow_finished",
@@ -241,7 +248,7 @@ function replacementFlowFinishedResponse(payload: unknown): Record<string, unkno
   const notification = replacementFlowNotification(event);
 
   return {
-    ok: event.outcome === "noop",
+    ok: event.outcome === "noop" || event.outcome === "succeeded",
     kind: "replacement_flow_finished",
     notificationTitle: notification.title,
     notificationBody: notification.body,
@@ -270,6 +277,11 @@ function parseJsonArgument(value: string | undefined): unknown {
   return JSON.parse(value);
 }
 
+interface PrivateRewriteInput {
+  selectedText: string;
+  screenshotContext?: ScreenshotContextInput;
+}
+
 async function readStdin(): Promise<string> {
   const chunks: Buffer[] = [];
 
@@ -278,6 +290,22 @@ async function readStdin(): Promise<string> {
   }
 
   return Buffer.concat(chunks).toString("utf8");
+}
+
+async function readPrivateRewriteInput(): Promise<PrivateRewriteInput> {
+  const stdin = await readStdin();
+
+  if (process.env.REWRITE_HOTKEY_PRIVATE_PIPE_FORMAT !== "json") {
+    return { selectedText: stdin };
+  }
+
+  const object = asRecord(JSON.parse(stdin));
+  const selectedText = typeof object.selectedText === "string" ? object.selectedText : "";
+
+  return {
+    selectedText,
+    screenshotContext: screenshotContextInputFrom(object.screenshotContext)
+  };
 }
 
 function hotkeyRegistrationEvent(payload: unknown): MetadataLogEvent {
@@ -314,6 +342,14 @@ function selectedTextCaptureEvent(payload: unknown): MetadataLogEvent {
     replacementTextCharLength: asNumber(metadata.replacementTextCharLength),
     pasteTextCharLength: asNumber(metadata.pasteTextCharLength),
     pollAttempts: asNumber(metadata.pollAttempts),
+    screenshotContextEnabled: asBoolean(metadata.screenshotContextEnabled),
+    screenshotContextCaptured: asBoolean(metadata.screenshotContextCaptured),
+    screenshotContextIncluded: asBoolean(metadata.screenshotContextIncluded),
+    screenshotContextDegraded: asBoolean(metadata.screenshotContextDegraded),
+    screenshotContextDegradationCategory: screenshotContextDegradationCategoryFrom(
+      metadata.screenshotContextDegradationCategory
+    ),
+    screenshotPayloadSizeClass: screenshotPayloadSizeClassFrom(metadata.screenshotPayloadSizeClass),
     durationMs: asNumber(metadata.durationMs)
   };
 }
@@ -341,6 +377,14 @@ function replacementFlowFinishedEvent(payload: unknown): MetadataLogEvent {
     replacementTextCharLength: asNumber(metadata.replacementTextCharLength),
     pasteTextCharLength: asNumber(metadata.pasteTextCharLength),
     pollAttempts: asNumber(metadata.pollAttempts),
+    screenshotContextEnabled: asBoolean(metadata.screenshotContextEnabled),
+    screenshotContextCaptured: asBoolean(metadata.screenshotContextCaptured),
+    screenshotContextIncluded: asBoolean(metadata.screenshotContextIncluded),
+    screenshotContextDegraded: asBoolean(metadata.screenshotContextDegraded),
+    screenshotContextDegradationCategory: screenshotContextDegradationCategoryFrom(
+      metadata.screenshotContextDegradationCategory
+    ),
+    screenshotPayloadSizeClass: screenshotPayloadSizeClassFrom(metadata.screenshotPayloadSizeClass),
     durationMs: asNumber(metadata.durationMs)
   };
 }
@@ -366,6 +410,7 @@ function metadataCategoryFrom(value: unknown): MetadataCategory | undefined {
     case "style_prompt_empty":
     case "style_prompt_too_large":
     case "payload_too_large":
+    case "vision_unsupported":
     case "azure_timeout":
     case "azure_network_error":
     case "azure_http_error":
@@ -399,6 +444,66 @@ function providerStatusClassFrom(value: unknown): ProviderStatusClass | undefine
     case "3xx":
     case "4xx":
     case "5xx":
+      return value;
+    default:
+      return undefined;
+  }
+}
+
+function screenshotContextInputFrom(value: unknown): ScreenshotContextInput | undefined {
+  const object = asRecord(value);
+
+  if (object.ok === false) {
+    return {
+      ok: false,
+      category: screenshotContextDegradationCategoryFrom(object.category)
+    };
+  }
+
+  if (
+    object.ok === true &&
+    isScreenshotContextMediaType(object.mediaType) &&
+    typeof object.base64 === "string" &&
+    typeof object.byteLength === "number"
+  ) {
+    return {
+      ok: true,
+      mediaType: object.mediaType,
+      base64: object.base64,
+      byteLength: object.byteLength,
+      width: asNumber(object.width),
+      height: asNumber(object.height)
+    };
+  }
+
+  return undefined;
+}
+
+function isScreenshotContextMediaType(value: unknown): value is ScreenshotContextMediaType {
+  return value === "image/jpeg" || value === "image/png" || value === "image/webp";
+}
+
+function screenshotContextDegradationCategoryFrom(
+  value: unknown
+): ScreenshotContextDegradationCategory | undefined {
+  switch (value) {
+    case "screenshot_capture_failed":
+    case "screenshot_processing_failed":
+    case "screenshot_payload_too_large":
+    case "vision_unsupported":
+      return value;
+    default:
+      return undefined;
+  }
+}
+
+function screenshotPayloadSizeClassFrom(value: unknown): ScreenshotPayloadSizeClass | undefined {
+  switch (value) {
+    case "none":
+    case "small":
+    case "medium":
+    case "large":
+    case "too_large":
       return value;
     default:
       return undefined;
@@ -448,6 +553,13 @@ function selectedTextCaptureNotification(event: MetadataLogEvent): { title: stri
 }
 
 function replacementFlowNotification(event: MetadataLogEvent): { title: string; body: string } {
+  if (event.outcome === "succeeded" && event.screenshotContextDegraded === true) {
+    return {
+      title: "Rewrite degraded",
+      body: "Screenshot Context was unavailable, so the rewrite used Selected Text only."
+    };
+  }
+
   if (event.outcome === "noop") {
     return {
       title: "No changes suggested",
@@ -502,6 +614,7 @@ function replacementFlowNotification(event: MetadataLogEvent): { title: string; 
     case "azure_network_error":
     case "azure_http_error":
     case "azure_malformed_response":
+    case "vision_unsupported":
       return {
         title: "Rewrite failed safely",
         body: "Azure did not return valid Replacement Text. Original selection and clipboard were restored where possible."

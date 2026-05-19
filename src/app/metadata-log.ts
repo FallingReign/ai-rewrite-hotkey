@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { getConfigDirectory } from "../config/paths.js";
 import type { SafeFailureCategory } from "../rewrite/types.js";
+import type { ScreenshotContextDegradationCategory, ScreenshotPayloadSizeClass } from "../screenshot/screenshot-context.js";
 import type { SelectedTextCaptureFailureCategory } from "../capture/selected-text-capture.js";
 
 export type MetadataEventName =
@@ -58,6 +59,12 @@ export interface MetadataLogEvent {
   replacementTextCharLength?: number;
   pasteTextCharLength?: number;
   pollAttempts?: number;
+  screenshotContextEnabled?: boolean;
+  screenshotContextCaptured?: boolean;
+  screenshotContextIncluded?: boolean;
+  screenshotContextDegraded?: boolean;
+  screenshotContextDegradationCategory?: ScreenshotContextDegradationCategory;
+  screenshotPayloadSizeClass?: ScreenshotPayloadSizeClass;
 }
 
 export type MetadataLogger = (event: MetadataLogEvent) => void;
@@ -159,6 +166,30 @@ function sanitiseMetadataLogEvent(event: MetadataLogEvent): Record<string, unkno
 
   if (event.pollAttempts !== undefined) {
     entry.pollAttempts = event.pollAttempts;
+  }
+
+  if (event.screenshotContextEnabled !== undefined) {
+    entry.screenshotContextEnabled = event.screenshotContextEnabled;
+  }
+
+  if (event.screenshotContextCaptured !== undefined) {
+    entry.screenshotContextCaptured = event.screenshotContextCaptured;
+  }
+
+  if (event.screenshotContextIncluded !== undefined) {
+    entry.screenshotContextIncluded = event.screenshotContextIncluded;
+  }
+
+  if (event.screenshotContextDegraded !== undefined) {
+    entry.screenshotContextDegraded = event.screenshotContextDegraded;
+  }
+
+  if (event.screenshotContextDegradationCategory !== undefined) {
+    entry.screenshotContextDegradationCategory = event.screenshotContextDegradationCategory;
+  }
+
+  if (event.screenshotPayloadSizeClass !== undefined) {
+    entry.screenshotPayloadSizeClass = event.screenshotPayloadSizeClass;
   }
 
   return entry;

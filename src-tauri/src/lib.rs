@@ -224,8 +224,30 @@ fn handle_rewrite_hotkey(app: AppHandle) {
                     return;
                 }
 
-                match run_tauri_cli_with_stdin(&app, &["replacement-flow-rewrite"], &selected_text)
-                {
+                let screenshot_context = capture_optional_screenshot_context();
+
+                if cancellation_requested(&app) {
+                    let native_payload = session.restore_without_paste();
+                    notify_replacement_flow_finished(
+                        &app,
+                        replacement_flow_finished_payload(
+                            "safe_failure",
+                            Some("disabled_app".to_string()),
+                            None,
+                            native_payload,
+                            None,
+                        ),
+                    );
+                    finish_hotkey_thread(&app);
+                    return;
+                }
+
+                match run_tauri_cli_with_rewrite_input(
+                    &app,
+                    &["replacement-flow-rewrite"],
+                    &selected_text,
+                    screenshot_context,
+                ) {
                     Ok(plan) => finish_replacement_flow_from_plan(&app, plan, session),
                     Err(error) => {
                         let native_payload = session.restore_without_paste();
@@ -301,6 +323,25 @@ fn cancellation_requested(app: &AppHandle) -> bool {
     app.state::<HotkeyRuntimeState>()
         .cancel_requested
         .load(Ordering::SeqCst)
+}
+
+fn capture_optional_screenshot_context() -> Option<Value> {
+    if !screenshot_context_enabled() {
+        return None;
+    }
+
+    Some(match native_capture::capture_screenshot_context() {
+        Ok(image) => serde_json::to_value(image).unwrap_or_else(|_| {
+            serde_json::json!({
+                "ok": false,
+                "category": "screenshot_processing_failed"
+            })
+        }),
+        Err(category) => serde_json::json!({
+            "ok": false,
+            "category": category
+        }),
+    })
 }
 
 fn sync_rewrite_hotkey_registration(app: &AppHandle, value: &Value) -> HotkeyRegistrationResult {
@@ -481,7 +522,16 @@ fn replacement_flow_finished_payload(
         plan.and_then(|value| value.get("metadata"))
             .and_then(Value::as_object),
     ) {
-        for key in ["replacementTextCharLength", "pasteTextCharLength"] {
+        for key in [
+            "replacementTextCharLength",
+            "pasteTextCharLength",
+            "screenshotContextEnabled",
+            "screenshotContextCaptured",
+            "screenshotContextIncluded",
+            "screenshotContextDegraded",
+            "screenshotContextDegradationCategory",
+            "screenshotPayloadSizeClass",
+        ] {
             if let Some(value) = plan_metadata.get(key) {
                 metadata_object.insert(key.to_string(), value.clone());
             }
@@ -505,7 +555,14 @@ fn notify_replacement_flow_finished(app: &AppHandle, payload: Value) {
     let payload_json = payload.to_string();
     let response = run_tauri_cli(&["replacement-flow-finished", payload_json.as_str()]);
 
-    if silent_success {
+    let degraded_success = payload
+        .get("metadata")
+        .and_then(Value::as_object)
+        .and_then(|metadata| metadata.get("screenshotContextDegraded"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    if silent_success && !degraded_success {
         return;
     }
 
@@ -537,11 +594,17 @@ fn run_tauri_cli(args: &[&str]) -> Result<Value, ()> {
     serde_json::from_str(stdout.trim()).map_err(|_| ())
 }
 
-fn run_tauri_cli_with_stdin(
+fn run_tauri_cli_with_rewrite_input(
     app: &AppHandle,
     args: &[&str],
-    stdin_text: &str,
+    selected_text: &str,
+    screenshot_context: Option<Value>,
 ) -> Result<Value, TauriCliError> {
+    let input = serde_json::json!({
+        "selectedText": selected_text,
+        "screenshotContext": screenshot_context
+    });
+    let stdin_text = input.to_string();
     let mut command = Command::new(npm_command());
     command
         .current_dir(project_root())
@@ -551,6 +614,7 @@ fn run_tauri_cli_with_stdin(
         .arg("--")
         .args(args)
         .env("REWRITE_HOTKEY_PRIVATE_PIPE", "1")
+        .env("REWRITE_HOTKEY_PRIVATE_PIPE_FORMAT", "json")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
@@ -611,6 +675,22 @@ fn load_configured_hotkey() -> Option<String> {
     } else {
         Some(hotkey.to_string())
     }
+}
+
+fn screenshot_context_enabled() -> bool {
+    let raw = match std::fs::read_to_string(config_path()) {
+        Ok(raw) => raw,
+        Err(_) => return true,
+    };
+    let value: Value = match serde_json::from_str(&raw) {
+        Ok(value) => value,
+        Err(_) => return true,
+    };
+
+    value
+        .get("screenshotContextEnabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
 }
 
 fn config_path() -> PathBuf {

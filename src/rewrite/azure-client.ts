@@ -3,6 +3,7 @@ import { RewriteSafeFailureError } from "./errors.js";
 import type { FetchLike, RewritePrompt } from "./types.js";
 
 export const TEXT_ONLY_REQUEST_PAYLOAD_MAX_BYTES = 32768;
+export const SCREENSHOT_REQUEST_PAYLOAD_MAX_BYTES = 1024 * 1024;
 
 export interface RewriteTimer {
   setTimeout(callback: () => void, ms: number): unknown;
@@ -15,6 +16,7 @@ export interface AzureRewriteClientOptions {
 
 export interface AzureRewriteRequestOptions {
   abortSignal?: AbortSignal;
+  maxPayloadBytes?: number;
 }
 
 interface AzureChatCompletionsRequestBody {
@@ -43,8 +45,9 @@ export class AzureRewriteClient {
   async rewrite(prompt: RewritePrompt, options: AzureRewriteRequestOptions = {}): Promise<string> {
     const body = buildAzureChatCompletionsBody(prompt);
     const payload = JSON.stringify(body);
+    const maxPayloadBytes = options.maxPayloadBytes ?? TEXT_ONLY_REQUEST_PAYLOAD_MAX_BYTES;
 
-    if (Buffer.byteLength(payload, "utf8") > TEXT_ONLY_REQUEST_PAYLOAD_MAX_BYTES) {
+    if (Buffer.byteLength(payload, "utf8") > maxPayloadBytes) {
       throw new RewriteSafeFailureError("payload_too_large");
     }
 
@@ -78,6 +81,11 @@ export class AzureRewriteClient {
       }
 
       if (!response.ok) {
+        const errorBody = await readErrorResponse(response);
+        if (promptHasImageInput(prompt) && isVisionUnsupportedHttpError(response.status, errorBody)) {
+          throw new RewriteSafeFailureError("vision_unsupported", { httpStatus: response.status });
+        }
+
         throw new RewriteSafeFailureError("azure_http_error", { httpStatus: response.status });
       }
 
@@ -132,6 +140,45 @@ async function readJsonResponse(response: Response): Promise<AzureChatCompletion
   } catch {
     throw new RewriteSafeFailureError("azure_malformed_response");
   }
+}
+
+async function readErrorResponse(response: Response): Promise<string> {
+  try {
+    return (await response.text()).slice(0, 4096);
+  } catch {
+    return "";
+  }
+}
+
+function promptHasImageInput(prompt: RewritePrompt): boolean {
+  return prompt.messages.some((message) =>
+    Array.isArray(message.content)
+      ? message.content.some((part) => part.type === "image_url" && part.image_url.url.startsWith("data:image/"))
+      : false
+  );
+}
+
+function isVisionUnsupportedHttpError(status: number, body: string): boolean {
+  if (![400, 404, 415, 422].includes(status)) {
+    return false;
+  }
+
+  const text = body.toLowerCase();
+  const mentionsVisionInput =
+    text.includes("image_url") ||
+    text.includes("image input") ||
+    text.includes("vision") ||
+    text.includes("multimodal") ||
+    text.includes("multi-modal") ||
+    text.includes("content part");
+  const mentionsUnsupported =
+    text.includes("unsupported") ||
+    text.includes("not supported") ||
+    text.includes("does not support") ||
+    text.includes("invalid") ||
+    text.includes("unknown");
+
+  return mentionsVisionInput && mentionsUnsupported;
 }
 
 function extractReplacementCandidate(responseBody: AzureChatCompletionsResponseBody): string {

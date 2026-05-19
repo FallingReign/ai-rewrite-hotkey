@@ -1,3 +1,4 @@
+import { screenshotContextDataUrl } from "../screenshot/screenshot-context.js";
 import type { RewritePrompt, RewritePromptInput } from "./types.js";
 
 export const LOCKED_GUARDRAILS = [
@@ -7,6 +8,7 @@ export const LOCKED_GUARDRAILS = [
   "- Preserve names, numbers, dates, URLs, code, commands, and commitments.",
   "- Preserve uncertainty when present.",
   "- Do not add unsupported claims, examples, citations, emojis, signatures, apologies, enthusiasm, warmth, or certainty unless clearly implied.",
+  "- If Screenshot Context is provided, use it only as surrounding context for interpreting the Selected Text; never mention, describe, cite, or imply the screenshot in Replacement Text.",
   "- Apply the Style Prompt only when it does not conflict with these Locked Guardrails.",
   "- If no useful rewrite is possible, return the original Selected Text without explanation."
 ].join("\n");
@@ -28,6 +30,17 @@ export const PLAIN_REPLACEMENT_TEXT_CONTRACT = [
 export function buildRewritePrompt(input: RewritePromptInput): RewritePrompt {
   const selectedText = input.selectedText;
   const stylePrompt = input.stylePrompt.trim();
+  const userText = [
+    "Style Prompt:",
+    stylePrompt,
+    "",
+    "Selected Text:",
+    "<selected_text>",
+    selectedText,
+    "</selected_text>",
+    "",
+    "Rewrite the Selected Text now. Return only Replacement Text."
+  ].join("\n");
 
   return {
     messages: [
@@ -37,17 +50,25 @@ export function buildRewritePrompt(input: RewritePromptInput): RewritePrompt {
       },
       {
         role: "user",
-        content: [
-          "Style Prompt:",
-          stylePrompt,
-          "",
-          "Selected Text:",
-          "<selected_text>",
-          selectedText,
-          "</selected_text>",
-          "",
-          "Rewrite the Selected Text now. Return only Replacement Text."
-        ].join("\n")
+        content:
+          input.screenshotContext === undefined
+            ? userText
+            : [
+                {
+                  type: "text",
+                  text: userText
+                },
+                {
+                  type: "image_url",
+                  image_url: {
+                    url: screenshotContextDataUrl({
+                      ...input.screenshotContext,
+                      byteLength: 1
+                    }),
+                    detail: "low"
+                  }
+                }
+              ]
       }
     ]
   };

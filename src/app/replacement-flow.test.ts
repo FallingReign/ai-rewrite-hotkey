@@ -21,6 +21,14 @@ const CONFIGURED_CONFIG: RewriteHotkeyConfig = {
   azureOpenAIDeployment: "rewrite-deployment",
   azureOpenAIApiVersion: "2025-01-01-preview"
 };
+const SCREENSHOT_CONTEXT = {
+  ok: true as const,
+  mediaType: "image/jpeg" as const,
+  base64: Buffer.from("fake screenshot bytes").toString("base64"),
+  byteLength: 128,
+  width: 64,
+  height: 32
+};
 
 test("Replacement Flow plans a silent paste with preserved whitespace wrappers", async () => {
   const selectedText = " \nNeeds work.\r\n";
@@ -99,6 +107,75 @@ test("Azure failure becomes content-free Safe Failure with provider status class
   assert.equal(JSON.stringify(plan).includes("ignored provider detail"), false);
 });
 
+test("Replacement Flow can include Screenshot Context while keeping plans content-free", async () => {
+  let requestBody = "";
+  const plan = await planReplacementFlowRewrite({
+    config: CONFIGURED_CONFIG,
+    selectedText: "make this clearer",
+    screenshotContext: SCREENSHOT_CONTEXT,
+    fetchFn: async (_input, init) => {
+      requestBody = String(init.body);
+      return new Response(JSON.stringify({ choices: [{ message: { content: "This is clearer." } }] }), { status: 200 });
+    }
+  });
+
+  assert.equal(plan.action, "paste");
+  assert.equal(plan.metadata.screenshotContextEnabled, true);
+  assert.equal(plan.metadata.screenshotContextCaptured, true);
+  assert.equal(plan.metadata.screenshotContextIncluded, true);
+  assert.equal(plan.metadata.screenshotContextDegraded, false);
+  assert.equal(requestBody.includes(SCREENSHOT_CONTEXT.base64), true);
+
+  const contentFree = JSON.stringify(toContentFreeReplacementFlowRewritePlan(plan));
+  assert.equal(contentFree.includes(SCREENSHOT_CONTEXT.base64), false);
+});
+
+test("Screenshot Context disabled keeps Replacement Flow text-only", async () => {
+  let requestBody = "";
+  const plan = await planReplacementFlowRewrite({
+    config: {
+      ...CONFIGURED_CONFIG,
+      screenshotContextEnabled: false
+    },
+    selectedText: "make this clearer",
+    screenshotContext: SCREENSHOT_CONTEXT,
+    fetchFn: async (_input, init) => {
+      requestBody = String(init.body);
+      return new Response(JSON.stringify({ choices: [{ message: { content: "This is clearer." } }] }), { status: 200 });
+    }
+  });
+
+  assert.equal(plan.action, "paste");
+  assert.equal(plan.metadata.screenshotContextEnabled, false);
+  assert.equal(plan.metadata.screenshotContextIncluded, false);
+  assert.equal(requestBody.includes(SCREENSHOT_CONTEXT.base64), false);
+});
+
+test("Screenshot Context degradation continues text-only and notifies without private content", async () => {
+  let requestBody = "";
+  const result = await runReplacementFlow({
+    config: CONFIGURED_CONFIG,
+    native: createNativeFixture({
+      captureScreenshotContext: async () => ({
+        ok: false,
+        category: "screenshot_capture_failed"
+      })
+    }),
+    fetchFn: async (_input, init) => {
+      requestBody = String(init.body);
+      return new Response(JSON.stringify({ choices: [{ message: { content: "This is clearer." } }] }), { status: 200 });
+    }
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.outcome, "succeeded");
+  assert.equal(result.metadata.screenshotContextDegraded, true);
+  assert.equal(result.metadata.screenshotContextDegradationCategory, "screenshot_capture_failed");
+  assert.equal(result.notificationTitle, "Rewrite degraded");
+  assert.equal(requestBody.includes(SCREENSHOT_CONTEXT.base64), false);
+  assert.equal(JSON.stringify(result).includes(SCREENSHOT_CONTEXT.base64), false);
+});
+
 test("Replacement Flow metadata logs clipboard restore without private content", () => {
   const selectedText = "make this clearer";
   const replacementText = "This is clearer.";
@@ -116,6 +193,12 @@ test("Replacement Flow metadata logs clipboard restore without private content",
     usableTextCharLength: selectedText.length,
     replacementTextCharLength: replacementText.length,
     pasteTextCharLength: replacementText.length,
+    screenshotContextEnabled: true,
+    screenshotContextCaptured: true,
+    screenshotContextIncluded: false,
+    screenshotContextDegraded: true,
+    screenshotContextDegradationCategory: "vision_unsupported",
+    screenshotPayloadSizeClass: "small",
     durationMs: 750
   };
 
@@ -124,8 +207,11 @@ test("Replacement Flow metadata logs clipboard restore without private content",
     const log = fs.readFileSync(logPath, "utf8");
     assert.match(log, /"clipboardRestored":true/);
     assert.match(log, /"pasteSent":true/);
+    assert.match(log, /"screenshotContextDegraded":true/);
+    assert.match(log, /"screenshotContextDegradationCategory":"vision_unsupported"/);
     assert.equal(log.includes(selectedText), false);
     assert.equal(log.includes(replacementText), false);
+    assert.equal(log.includes(SCREENSHOT_CONTEXT.base64), false);
   } finally {
     fs.rmSync(outputDirectory, { recursive: true, force: true });
   }

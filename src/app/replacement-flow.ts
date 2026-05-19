@@ -6,7 +6,8 @@ import {
   type RewriteTarget
 } from "../capture/selected-text-capture.js";
 import type { RewriteHotkeyConfig } from "../config/types.js";
-import { runTextOnlyRewriteRequest } from "../rewrite/rewrite-request.js";
+import type { ScreenshotContextInput, ScreenshotContextMetadata } from "../screenshot/screenshot-context.js";
+import { runScreenshotAwareRewriteRequest } from "../rewrite/rewrite-request.js";
 import type { FetchLike, RewriteTimer, SafeFailureCategory } from "../rewrite/types.js";
 import { deriveRewriteAppState } from "./app-state.js";
 import { statusClassForHttpStatus, type MetadataCategory, type ProviderStatusClass } from "./metadata-log.js";
@@ -33,6 +34,12 @@ export interface ReplacementFlowRewriteMetadata {
   pasteTextCharLength?: number;
   pollAttempts?: number;
   durationMs?: number;
+  screenshotContextEnabled?: boolean;
+  screenshotContextCaptured?: boolean;
+  screenshotContextIncluded?: boolean;
+  screenshotContextDegraded?: boolean;
+  screenshotContextDegradationCategory?: ScreenshotContextMetadata["screenshotContextDegradationCategory"];
+  screenshotPayloadSizeClass?: ScreenshotContextMetadata["screenshotPayloadSizeClass"];
 }
 
 export interface ReplacementFlowRewriteOptions {
@@ -42,6 +49,7 @@ export interface ReplacementFlowRewriteOptions {
   abortSignal?: AbortSignal;
   timer?: RewriteTimer;
   now?: () => number;
+  screenshotContext?: ScreenshotContextInput;
 }
 
 export interface ReplacementFlowPastePlan {
@@ -50,6 +58,8 @@ export interface ReplacementFlowPastePlan {
   code: "replacement_flow_ready_to_paste";
   pasteText: string;
   metadata: ReplacementFlowRewriteMetadata;
+  notificationTitle?: string;
+  notificationBody?: string;
 }
 
 export interface ReplacementFlowNoOpPlan {
@@ -98,13 +108,19 @@ export async function planReplacementFlowRewrite(
   };
 
   try {
-    const result = await runTextOnlyRewriteRequest({
+    const rewrite = await runScreenshotAwareRewriteRequest({
       config: options.config,
       selectedText: captured.usableText,
       fetchFn: options.fetchFn,
       abortSignal: options.abortSignal,
-      timer: options.timer
+      timer: options.timer,
+      screenshotContext: options.screenshotContext
     });
+    const result = rewrite.result;
+    const rewriteMetadata = {
+      ...baseMetadata,
+      ...rewrite.metadata
+    };
 
     const durationMs = elapsed(options, startedAt);
 
@@ -117,11 +133,12 @@ export async function planReplacementFlowRewrite(
           code: "replacement_flow_ready_to_paste",
           pasteText,
           metadata: {
-            ...baseMetadata,
+            ...rewriteMetadata,
             replacementTextCharLength: result.replacementText.length,
             pasteTextCharLength: pasteText.length,
             durationMs
-          }
+          },
+          ...optionalDegradedRewriteNotification(rewriteMetadata)
         };
       }
       case "noop":
@@ -130,16 +147,18 @@ export async function planReplacementFlowRewrite(
           action: "noop",
           code: "replacement_flow_noop",
           metadata: {
-            ...baseMetadata,
+            ...rewriteMetadata,
             durationMs
           },
-          notificationTitle: "No changes suggested",
-          notificationBody: "No change was suggested, so the original selection was left untouched."
+          ...requiredRewriteNotification(rewriteMetadata, {
+            title: "No changes suggested",
+            body: "No change was suggested, so the original selection was left untouched."
+          })
         };
       case "safe_failure":
         return safeFailure(
           result.category,
-          baseMetadata,
+          rewriteMetadata,
           durationMs,
           statusClassForHttpStatus(result.httpStatus)
         );
@@ -170,6 +189,7 @@ export type ReplacementFlowRunOutcome = "succeeded" | "noop" | "safe_failure" | 
 export interface ReplacementFlowNativePrimitives {
   captureForegroundTarget(): Promise<RewriteTarget>;
   captureClipboardSnapshot(): Promise<ClipboardSnapshot>;
+  captureScreenshotContext?(): Promise<ScreenshotContextInput>;
   sendCopy(): Promise<void>;
   readClipboardPlainText(): Promise<string | null>;
   writeClipboardPlainText(text: string): Promise<void>;
@@ -304,13 +324,15 @@ export async function runReplacementFlow(options: ReplacementFlowRunOptions): Pr
       return restoreThenRunFailure(options, snapshot, "disabled_app", metadata, startedAt);
     }
 
+    const screenshotContext = await captureOptionalNativeScreenshotContext(options);
     const plan = await planReplacementFlowRewrite({
       config: options.config,
       selectedText,
       fetchFn: options.fetchFn,
       abortSignal: options.abortSignal,
       timer: options.timer,
-      now: () => options.native.now()
+      now: () => options.native.now(),
+      screenshotContext
     });
 
     mergePlanMetadata(metadata, plan.metadata);
@@ -373,7 +395,9 @@ export async function runReplacementFlow(options: ReplacementFlowRunOptions): Pr
     return {
       ok: true,
       outcome: "succeeded",
-      metadata: withDuration(metadata, options.native, startedAt)
+      metadata: withDuration(metadata, options.native, startedAt),
+      notificationTitle: plan.notificationTitle,
+      notificationBody: plan.notificationBody
     };
   } catch {
     return restoreThenRunFailure(options, snapshot, "unexpected_error", metadata, startedAt);
@@ -389,6 +413,20 @@ function ignoredInFlightResult(): ReplacementFlowRunResult {
     notificationTitle: "Rewrite already in progress",
     notificationBody: "The current rewrite must finish before another can start."
   };
+}
+
+async function captureOptionalNativeScreenshotContext(
+  options: ReplacementFlowRunOptions
+): Promise<ScreenshotContextInput | undefined> {
+  if (!options.config.screenshotContextEnabled || options.native.captureScreenshotContext === undefined) {
+    return undefined;
+  }
+
+  try {
+    return await options.native.captureScreenshotContext();
+  } catch {
+    return { ok: false, category: "screenshot_capture_failed" };
+  }
 }
 
 async function pollForPlainText(
@@ -485,9 +523,18 @@ function mergePlanMetadata(
   metadata: ReplacementFlowRewriteMetadata,
   planMetadata: ReplacementFlowRewriteMetadata
 ): void {
-  for (const key of ["replacementTextCharLength", "pasteTextCharLength"] as const) {
+  for (const key of [
+    "replacementTextCharLength",
+    "pasteTextCharLength",
+    "screenshotContextEnabled",
+    "screenshotContextCaptured",
+    "screenshotContextIncluded",
+    "screenshotContextDegraded",
+    "screenshotContextDegradationCategory",
+    "screenshotPayloadSizeClass"
+  ] as const) {
     if (planMetadata[key] !== undefined) {
-      metadata[key] = planMetadata[key];
+      (metadata as Record<string, unknown>)[key] = planMetadata[key];
     }
   }
 }
@@ -537,6 +584,34 @@ function safeFailure(
     },
     notificationTitle: notificationForReplacementFlowCategory(category).title,
     notificationBody: notificationForReplacementFlowCategory(category).body
+  };
+}
+
+function optionalDegradedRewriteNotification(
+  metadata: ReplacementFlowRewriteMetadata
+): { notificationTitle?: string; notificationBody?: string } {
+  return metadata.screenshotContextDegraded === true
+    ? {
+        notificationTitle: "Rewrite degraded",
+        notificationBody: "Screenshot Context was unavailable, so the rewrite used Selected Text only."
+      }
+    : {};
+}
+
+function requiredRewriteNotification(
+  metadata: ReplacementFlowRewriteMetadata,
+  fallback: { title: string; body: string }
+): { notificationTitle: string; notificationBody: string } {
+  if (metadata.screenshotContextDegraded === true) {
+    return {
+      notificationTitle: "Rewrite degraded",
+      notificationBody: "Screenshot Context was unavailable, so the rewrite used Selected Text only."
+    };
+  }
+
+  return {
+    notificationTitle: fallback.title,
+    notificationBody: fallback.body
   };
 }
 
@@ -603,6 +678,7 @@ export function notificationForReplacementFlowCategory(category: MetadataCategor
     case "azure_network_error":
     case "azure_http_error":
     case "azure_malformed_response":
+    case "vision_unsupported":
       return {
         title: "Rewrite failed safely",
         body: "Azure did not return valid Replacement Text. Original selection and clipboard were restored where possible."

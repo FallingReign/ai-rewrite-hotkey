@@ -2,9 +2,25 @@ import type { RewriteHotkeyConfig } from "../config/types.js";
 
 export type ChatMessageRole = "system" | "user" | "assistant";
 
+export interface ChatTextContentPart {
+  type: "text";
+  text: string;
+}
+
+export interface ChatImageUrlContentPart {
+  type: "image_url";
+  image_url: {
+    url: string;
+    detail?: "low" | "high" | "auto";
+  };
+}
+
+export type ChatMessageContentPart = ChatTextContentPart | ChatImageUrlContentPart;
+export type ChatMessageContent = string | ChatMessageContentPart[];
+
 export interface ChatMessage {
   role: ChatMessageRole;
-  content: string;
+  content: ChatMessageContent;
 }
 
 export interface RewritePrompt {
@@ -14,6 +30,10 @@ export interface RewritePrompt {
 export interface RewritePromptInput {
   selectedText: string;
   stylePrompt: string;
+  screenshotContext?: {
+    mediaType: "image/jpeg" | "image/png" | "image/webp";
+    base64: string;
+  };
 }
 
 export interface TextOnlyRewriteRequest {
@@ -31,6 +51,7 @@ export type SafeFailureCategory =
   | "style_prompt_empty"
   | "style_prompt_too_large"
   | "payload_too_large"
+  | "vision_unsupported"
   | "azure_timeout"
   | "azure_network_error"
   | "azure_http_error"

@@ -41,6 +41,8 @@ Fill in these values before live Azure testing:
 - `azureOpenAIDeployment`
 - `azureOpenAIApiVersion`
 
+`screenshotContextEnabled` defaults to `true` for the Personal Prototype. Screenshots are optional context for the Replacement Flow only; failures or unsupported vision input degrade to Selected Text only.
+
 The API key is stored only in the per-user local config file for V0. Do not copy local config values into the repository, issues, logs, or chat.
 
 ## Live Test Rewrite
@@ -65,7 +67,7 @@ The tray menu exposes enable, disable, open settings, Test Rewrite, and quit act
 
 ## Replacement Flow
 
-When the configured Rewrite Hotkey fires, the app captures the foreground Rewrite Target, snapshots the native clipboard before copy, sends copy, polls briefly for usable plain Selected Text, sends a text-only live Azure Rewrite Request, validates plain Replacement Text, pastes it over the original selection, waits 500 ms, and restores the Clipboard Snapshot. Successful replacement is silent. No-Op Rewrite and Safe Failure outcomes notify with content-free messages.
+When the configured Rewrite Hotkey fires, the app captures the foreground Rewrite Target, snapshots the native clipboard before copy, sends copy, polls briefly for usable plain Selected Text, optionally captures in-memory full-screen Screenshot Context, sends a live Azure Rewrite Request, validates plain Replacement Text, pastes it over the original selection, waits 500 ms, and restores the Clipboard Snapshot. Successful replacement is silent unless the rewrite degrades to Selected Text only because optional Screenshot Context was unavailable or unsupported. No-Op Rewrite and Safe Failure outcomes notify with content-free messages.
 
 ## Development checks
 
