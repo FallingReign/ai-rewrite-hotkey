@@ -45,6 +45,8 @@ Fill in these values before live Azure testing:
 
 The API key is stored only in the per-user local config file for V0. Do not copy local config values into the repository, issues, logs, or chat.
 
+The tray app also includes a minimal **Open Settings** window for editing the local config. The UI leaves the API key field blank, shows only whether a stored key exists, and includes a **Clear API key** action. Saved settings are validated before they replace the local config; changing the Rewrite Hotkey re-registers it, and `launchOnStartup` controls the current Windows user's startup registration.
+
 ## Live Test Rewrite
 
 Run a text-only **Test Rewrite** against the configured Azure OpenAI resource:

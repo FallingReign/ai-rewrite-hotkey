@@ -11,12 +11,13 @@
       {
         "label": "main",
         "title": "Rewrite Hotkey",
-        "width": 320,
-        "height": 220,
+        "width": 760,
+        "height": 820,
         "visible": false,
-        "skipTaskbar": true
+        "skipTaskbar": false
       }
     ],
+    "withGlobalTauri": true,
     "security": {
       "csp": null
     }

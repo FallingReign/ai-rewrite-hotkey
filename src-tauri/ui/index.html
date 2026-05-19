@@ -2,12 +2,361 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>Rewrite Hotkey</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Rewrite Hotkey Settings</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family:
+          "Segoe UI",
+          system-ui,
+          sans-serif;
+        font-size: 14px;
+      }
+
+      body {
+        margin: 0;
+        background: Canvas;
+        color: CanvasText;
+      }
+
+      main {
+        max-width: 720px;
+        margin: 0 auto;
+        padding: 24px;
+      }
+
+      h1 {
+        margin: 0 0 4px;
+        font-size: 24px;
+      }
+
+      .intro {
+        margin: 0 0 20px;
+        color: GrayText;
+      }
+
+      form {
+        display: grid;
+        gap: 16px;
+      }
+
+      fieldset {
+        display: grid;
+        gap: 12px;
+        margin: 0;
+        padding: 16px;
+        border: 1px solid color-mix(in srgb, CanvasText 18%, transparent);
+        border-radius: 12px;
+      }
+
+      legend {
+        padding: 0 6px;
+        font-weight: 700;
+      }
+
+      label {
+        display: grid;
+        gap: 6px;
+        font-weight: 600;
+      }
+
+      label.inline {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-weight: 500;
+      }
+
+      input,
+      textarea,
+      button {
+        font: inherit;
+      }
+
+      input[type="text"],
+      input[type="password"],
+      input[type="number"],
+      textarea {
+        box-sizing: border-box;
+        width: 100%;
+        padding: 9px 10px;
+        border: 1px solid color-mix(in srgb, CanvasText 28%, transparent);
+        border-radius: 8px;
+        background: Canvas;
+        color: CanvasText;
+      }
+
+      textarea {
+        min-height: 120px;
+        resize: vertical;
+      }
+
+      input[aria-invalid="true"],
+      textarea[aria-invalid="true"] {
+        border-color: #c42b1c;
+      }
+
+      .hint {
+        color: GrayText;
+        font-size: 12px;
+        font-weight: 400;
+      }
+
+      .status {
+        min-height: 20px;
+        color: GrayText;
+      }
+
+      .status.error {
+        color: #c42b1c;
+      }
+
+      .issues {
+        display: none;
+        margin: 0;
+        padding: 12px 12px 12px 28px;
+        border-radius: 8px;
+        background: color-mix(in srgb, #c42b1c 12%, transparent);
+      }
+
+      .issues:not(:empty) {
+        display: block;
+      }
+
+      .guardrails {
+        max-height: 170px;
+        overflow: auto;
+        white-space: pre-wrap;
+        padding: 12px;
+        border-radius: 8px;
+        background: color-mix(in srgb, CanvasText 8%, transparent);
+        font-family: Consolas, "Cascadia Mono", monospace;
+        font-size: 12px;
+      }
+
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        justify-content: flex-end;
+      }
+
+      button {
+        min-width: 92px;
+        padding: 9px 14px;
+        border: 1px solid color-mix(in srgb, CanvasText 22%, transparent);
+        border-radius: 8px;
+        background: ButtonFace;
+        color: ButtonText;
+        cursor: pointer;
+      }
+
+      button.primary {
+        border-color: #0f6cbd;
+        background: #0f6cbd;
+        color: white;
+      }
+
+      button.danger {
+        margin-right: auto;
+      }
+    </style>
   </head>
   <body>
     <main>
-      <h1>Rewrite Hotkey</h1>
-      <p>Rewrite Hotkey is running from the system tray.</p>
+      <h1>Rewrite Hotkey Settings</h1>
+      <p class="intro">Configure the local Personal Prototype without exposing private rewrite content.</p>
+
+      <form id="settings-form">
+        <fieldset>
+          <legend>Azure OpenAI</legend>
+          <label>
+            Endpoint
+            <input id="azureOpenAIEndpoint" name="azureOpenAIEndpoint" type="text" autocomplete="off" />
+          </label>
+          <label>
+            API key
+            <input id="azureOpenAIApiKey" name="azureOpenAIApiKey" type="password" autocomplete="new-password" />
+            <span id="api-key-hint" class="hint">Leave blank to keep the stored key.</span>
+          </label>
+          <label>
+            Deployment
+            <input id="azureOpenAIDeployment" name="azureOpenAIDeployment" type="text" autocomplete="off" />
+          </label>
+          <label>
+            API version
+            <input id="azureOpenAIApiVersion" name="azureOpenAIApiVersion" type="text" autocomplete="off" />
+          </label>
+        </fieldset>
+
+        <fieldset>
+          <legend>Rewrite behaviour</legend>
+          <label class="inline">
+            <input id="enabled" name="enabled" type="checkbox" />
+            Enable Rewrite Hotkey
+          </label>
+          <label>
+            Rewrite Hotkey
+            <input id="hotkey" name="hotkey" type="text" autocomplete="off" />
+            <span class="hint">Example: Ctrl+Alt+Space</span>
+          </label>
+          <label>
+            Rewrite Timeout
+            <input id="timeoutMs" name="timeoutMs" type="number" min="3000" max="120000" step="1000" />
+            <span class="hint">Milliseconds. Timed-out rewrites are cancelled before paste.</span>
+          </label>
+          <label class="inline">
+            <input id="screenshotContextEnabled" name="screenshotContextEnabled" type="checkbox" />
+            Include Screenshot Context when available
+          </label>
+          <label class="inline">
+            <input id="launchOnStartup" name="launchOnStartup" type="checkbox" />
+            Launch on Windows startup
+          </label>
+        </fieldset>
+
+        <fieldset>
+          <legend>Style Prompt</legend>
+          <label>
+            Editable Style Prompt
+            <textarea id="userStylePrompt" name="userStylePrompt"></textarea>
+          </label>
+          <div>
+            <strong>Locked Guardrails</strong>
+            <p class="hint">These are always included and cannot be edited here.</p>
+            <pre id="locked-guardrails" class="guardrails" aria-readonly="true"></pre>
+          </div>
+        </fieldset>
+
+        <ul id="issues" class="issues" aria-live="polite"></ul>
+        <div id="status" class="status" role="status" aria-live="polite"></div>
+
+        <div class="actions">
+          <button id="clear-api-key" class="danger" type="button">Clear API key</button>
+          <button id="cancel" type="button">Cancel</button>
+          <button class="primary" type="submit">Save</button>
+        </div>
+      </form>
     </main>
+
+    <script>
+      const invoke = window.__TAURI__?.core?.invoke;
+      const form = document.querySelector("#settings-form");
+      const status = document.querySelector("#status");
+      const issues = document.querySelector("#issues");
+      const apiKeyHint = document.querySelector("#api-key-hint");
+      const fieldNames = [
+        "enabled",
+        "hotkey",
+        "azureOpenAIEndpoint",
+        "azureOpenAIApiKey",
+        "azureOpenAIDeployment",
+        "azureOpenAIApiVersion",
+        "screenshotContextEnabled",
+        "timeoutMs",
+        "userStylePrompt",
+        "launchOnStartup"
+      ];
+
+      if (!invoke) {
+        setStatus("Settings are unavailable because the Tauri API was not loaded.", true);
+      } else {
+        window.addEventListener("DOMContentLoaded", loadSettings);
+        form.addEventListener("submit", saveSettings);
+        document.querySelector("#cancel").addEventListener("click", () => invoke("settings_close"));
+        document.querySelector("#clear-api-key").addEventListener("click", clearApiKey);
+      }
+
+      async function loadSettings() {
+        setStatus("Loading settings...");
+        try {
+          applyResponse(await invoke("settings_status"), "Settings loaded.");
+        } catch {
+          setStatus("Settings could not be loaded.", true);
+        }
+      }
+
+      async function saveSettings(event) {
+        event.preventDefault();
+        setStatus("Saving settings...");
+        try {
+          const response = await invoke("settings_save", { draft: collectDraft() });
+          applyResponse(response, response.ok ? "Settings saved." : "Settings were not saved.");
+        } catch {
+          setStatus("Settings could not be saved.", true);
+        }
+      }
+
+      async function clearApiKey() {
+        setStatus("Clearing API key...");
+        try {
+          applyResponse(await invoke("settings_clear_api_key"), "API key cleared.");
+        } catch {
+          setStatus("API key could not be cleared.", true);
+        }
+      }
+
+      function collectDraft() {
+        return {
+          enabled: document.querySelector("#enabled").checked,
+          hotkey: document.querySelector("#hotkey").value,
+          azureOpenAIEndpoint: document.querySelector("#azureOpenAIEndpoint").value,
+          azureOpenAIApiKey: document.querySelector("#azureOpenAIApiKey").value,
+          azureOpenAIDeployment: document.querySelector("#azureOpenAIDeployment").value,
+          azureOpenAIApiVersion: document.querySelector("#azureOpenAIApiVersion").value,
+          screenshotContextEnabled: document.querySelector("#screenshotContextEnabled").checked,
+          timeoutMs: Number(document.querySelector("#timeoutMs").value),
+          userStylePrompt: document.querySelector("#userStylePrompt").value,
+          launchOnStartup: document.querySelector("#launchOnStartup").checked
+        };
+      }
+
+      function applyResponse(response, message) {
+        const settings = response.settings;
+        const values = settings.values;
+
+        for (const name of fieldNames) {
+          const element = document.querySelector(`#${name}`);
+          if (element.type === "checkbox") {
+            element.checked = Boolean(values[name]);
+          } else if (name === "azureOpenAIApiKey") {
+            element.value = "";
+          } else {
+            element.value = values[name] ?? "";
+          }
+        }
+
+        apiKeyHint.textContent = values.azureOpenAIApiKeyPresent
+          ? `Stored key: ${values.azureOpenAIApiKeyRedacted}. Leave blank to keep it.`
+          : "No API key is stored. Enter one before saving a configured app.";
+        document.querySelector("#locked-guardrails").textContent = settings.lockedGuardrails;
+        renderIssues(settings.validation.issues);
+        setStatus(message, response.ok === false);
+      }
+
+      function renderIssues(validationIssues) {
+        issues.replaceChildren();
+        for (const name of fieldNames) {
+          document.querySelector(`#${name}`).setAttribute("aria-invalid", "false");
+        }
+
+        for (const issue of validationIssues) {
+          const item = document.createElement("li");
+          item.textContent = `${issue.field}: ${issue.message}`;
+          issues.appendChild(item);
+
+          const field = document.querySelector(`#${issue.field}`);
+          if (field) {
+            field.setAttribute("aria-invalid", "true");
+          }
+        }
+      }
+
+      function setStatus(message, isError = false) {
+        status.textContent = message;
+        status.classList.toggle("error", isError);
+      }
+    </script>
   </body>
 </html>

@@ -10,7 +10,7 @@ use std::{
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::TrayIconBuilder,
-    AppHandle, Manager,
+    AppHandle, Manager, WindowEvent,
 };
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use tauri_plugin_notification::NotificationExt;
@@ -19,6 +19,15 @@ mod native_capture;
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
+
+#[cfg(windows)]
+use windows_sys::Win32::{
+    Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS},
+    System::Registry::{
+        RegCloseKey, RegCreateKeyW, RegDeleteValueW, RegSetValueExW, HKEY, HKEY_CURRENT_USER,
+        REG_SZ,
+    },
+};
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -55,6 +64,20 @@ pub fn run() {
                 .build(),
         )
         .manage(HotkeyRuntimeState::default())
+        .invoke_handler(tauri::generate_handler![
+            settings_status,
+            settings_save,
+            settings_clear_api_key,
+            settings_close
+        ])
+        .on_window_event(|window, event| {
+            if window.label() == "main" {
+                if let WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
         .setup(|app| {
             create_tray(app.handle())?;
             match run_tauri_cli(&["app-started"]) {
@@ -157,12 +180,23 @@ fn handle_menu_action(app: AppHandle, id: String) {
                 "No rewrite hotkey or rewrite work will run.",
             );
         }
-        "open_settings" => notify_from_cli_response(
-            &app,
-            run_tauri_cli(&["open-settings"]),
-            "Settings opened",
-            "Review local settings before enabling Rewrite Hotkey.",
-        ),
+        "open_settings" => {
+            let response = run_tauri_cli(&["open-settings"]);
+            if open_settings_window(&app).is_err() {
+                notify(
+                    &app,
+                    "Settings unavailable",
+                    "The settings window could not be opened.",
+                );
+                return;
+            }
+            notify_from_cli_response(
+                &app,
+                response,
+                "Settings opened",
+                "Review local settings before enabling Rewrite Hotkey.",
+            );
+        }
         "test_rewrite" => {
             notify(
                 &app,
@@ -182,6 +216,61 @@ fn handle_menu_action(app: AppHandle, id: String) {
             "The requested tray action is not available.",
         ),
     }
+}
+
+#[tauri::command]
+fn settings_status() -> Result<Value, String> {
+    run_tauri_cli(&["settings-status"]).map_err(|_| "settings_status_failed".to_string())
+}
+
+#[tauri::command]
+fn settings_save(app: AppHandle, draft: Value) -> Result<Value, String> {
+    let response = run_tauri_cli_with_json_input(&["settings-save"], &draft)
+        .map_err(|_| "settings_save_failed".to_string())?;
+
+    if response.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+        let registration = sync_rewrite_hotkey_registration(&app, &response);
+        sync_launch_on_startup(&app, &response);
+
+        if registration != HotkeyRegistrationResult::Failed {
+            notify_from_cli_response(
+                &app,
+                Ok(response.clone()),
+                "Settings saved",
+                "Rewrite Hotkey settings were updated.",
+            );
+        }
+    }
+
+    Ok(response)
+}
+
+#[tauri::command]
+fn settings_clear_api_key(app: AppHandle) -> Result<Value, String> {
+    let response = run_tauri_cli(&["settings-clear-api-key"])
+        .map_err(|_| "settings_clear_api_key_failed".to_string())?;
+
+    if response.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+        sync_rewrite_hotkey_registration(&app, &response);
+        notify_from_cli_response(
+            &app,
+            Ok(response.clone()),
+            "API key cleared",
+            "The stored Azure OpenAI API key was removed.",
+        );
+    }
+
+    Ok(response)
+}
+
+#[tauri::command]
+fn settings_close(app: AppHandle) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "settings_window_unavailable".to_string())?;
+    window
+        .hide()
+        .map_err(|_| "settings_window_unavailable".to_string())
 }
 
 fn handle_rewrite_hotkey(app: AppHandle) {
@@ -574,6 +663,13 @@ fn notify_replacement_flow_finished(app: &AppHandle, payload: Value) {
     );
 }
 
+fn open_settings_window(app: &AppHandle) -> Result<(), ()> {
+    let window = app.get_webview_window("main").ok_or(())?;
+    window.show().map_err(|_| ())?;
+    let _ = window.unminimize();
+    window.set_focus().map_err(|_| ())
+}
+
 fn run_tauri_cli(args: &[&str]) -> Result<Value, ()> {
     let mut command = Command::new(npm_command());
     command
@@ -590,6 +686,34 @@ fn run_tauri_cli(args: &[&str]) -> Result<Value, ()> {
     command.creation_flags(CREATE_NO_WINDOW);
 
     let output = command.output().map_err(|_| ())?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    serde_json::from_str(stdout.trim()).map_err(|_| ())
+}
+
+fn run_tauri_cli_with_json_input(args: &[&str], input: &Value) -> Result<Value, ()> {
+    let stdin_text = input.to_string();
+    let mut command = Command::new(npm_command());
+    command
+        .current_dir(project_root())
+        .arg("run")
+        .arg("--silent")
+        .arg("app:tauri")
+        .arg("--")
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+
+    let mut child = command.spawn().map_err(|_| ())?;
+    if let Some(stdin) = child.stdin.as_mut() {
+        stdin.write_all(stdin_text.as_bytes()).map_err(|_| ())?;
+    }
+    drop(child.stdin.take());
+
+    let output = child.wait_with_output().map_err(|_| ())?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     serde_json::from_str(stdout.trim()).map_err(|_| ())
 }
@@ -648,6 +772,89 @@ fn run_tauri_cli_with_rewrite_input(
         .map_err(|_| TauriCliError::Failed)?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     serde_json::from_str(stdout.trim()).map_err(|_| TauriCliError::Failed)
+}
+
+fn sync_launch_on_startup(app: &AppHandle, value: &Value) {
+    let Some(enabled) = value
+        .get("settings")
+        .and_then(|settings| settings.get("values"))
+        .and_then(|values| values.get("launchOnStartup"))
+        .and_then(Value::as_bool)
+    else {
+        return;
+    };
+
+    if set_launch_on_startup(enabled).is_err() {
+        notify(
+            app,
+            "Launch on startup not updated",
+            "The setting was saved, but Windows startup registration could not be updated.",
+        );
+    }
+}
+
+#[cfg(windows)]
+fn set_launch_on_startup(enabled: bool) -> Result<(), ()> {
+    unsafe {
+        let subkey = wide_null("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
+        let mut key: HKEY = std::ptr::null_mut();
+        let status = RegCreateKeyW(HKEY_CURRENT_USER, subkey.as_ptr(), &mut key);
+
+        if status != ERROR_SUCCESS {
+            return Err(());
+        }
+
+        let result = if enabled {
+            set_startup_registry_value(key)
+        } else {
+            delete_startup_registry_value(key)
+        };
+        RegCloseKey(key);
+        result
+    }
+}
+
+#[cfg(not(windows))]
+fn set_launch_on_startup(_enabled: bool) -> Result<(), ()> {
+    Ok(())
+}
+
+#[cfg(windows)]
+unsafe fn set_startup_registry_value(key: HKEY) -> Result<(), ()> {
+    let name = wide_null("Rewrite Hotkey");
+    let exe = std::env::current_exe().map_err(|_| ())?;
+    let value = wide_null(&exe.to_string_lossy());
+    let status = RegSetValueExW(
+        key,
+        name.as_ptr(),
+        0,
+        REG_SZ,
+        value.as_ptr() as *const u8,
+        (value.len() * std::mem::size_of::<u16>()) as u32,
+    );
+
+    if status == ERROR_SUCCESS {
+        Ok(())
+    } else {
+        Err(())
+    }
+}
+
+#[cfg(windows)]
+unsafe fn delete_startup_registry_value(key: HKEY) -> Result<(), ()> {
+    let name = wide_null("Rewrite Hotkey");
+    let status = RegDeleteValueW(key, name.as_ptr());
+
+    if status == ERROR_SUCCESS || status == ERROR_FILE_NOT_FOUND {
+        Ok(())
+    } else {
+        Err(())
+    }
+}
+
+#[cfg(windows)]
+fn wide_null(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
 fn npm_command() -> &'static str {

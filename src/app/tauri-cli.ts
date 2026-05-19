@@ -1,5 +1,4 @@
-import { spawn } from "node:child_process";
-import { ensureConfigFile, loadConfig, saveConfig } from "../config/config.js";
+import { loadConfig, saveConfig } from "../config/config.js";
 import { deriveRewriteAppState, deriveTrayMenuModel, withEnabled } from "./app-state.js";
 import {
   appendMetadataLogEvent,
@@ -11,6 +10,12 @@ import {
 } from "./metadata-log.js";
 import { planReplacementFlowRewrite } from "./replacement-flow.js";
 import { runSafeTestRewrite } from "./test-rewrite.js";
+import {
+  type SettingsCommandResponse,
+  settingsClearApiKeyResponse,
+  settingsSaveResponse,
+  settingsStatusResponse
+} from "../settings/settings.js";
 import type {
   ScreenshotContextDegradationCategory,
   ScreenshotContextInput,
@@ -44,6 +49,15 @@ async function main(): Promise<void> {
       return;
     case "open-settings":
       printJson(openSettingsResponse());
+      return;
+    case "settings-status":
+      printJson(settingsStatusResponse());
+      return;
+    case "settings-save":
+      printJson(await settingsSaveCommandResponse());
+      return;
+    case "settings-clear-api-key":
+      printJson(settingsClearApiKeyCommandResponse());
       return;
     case "test-rewrite":
       printJson({
@@ -130,17 +144,6 @@ function setEnabledResponse(enabled: boolean): Record<string, unknown> {
 }
 
 function openSettingsResponse(): Record<string, unknown> {
-  const configPath = ensureConfigFile();
-
-  if (process.platform === "win32") {
-    const child = spawn("notepad.exe", [configPath], {
-      detached: true,
-      stdio: "ignore",
-      windowsHide: true
-    });
-    child.unref();
-  }
-
   appendMetadataLogEvent({ event: "settings_opened" });
 
   return {
@@ -149,6 +152,33 @@ function openSettingsResponse(): Record<string, unknown> {
     notificationTitle: "Settings opened",
     notificationBody: "Review local settings before enabling Rewrite Hotkey."
   };
+}
+
+async function settingsSaveCommandResponse(): Promise<SettingsCommandResponse> {
+  const response = settingsSaveResponse(JSON.parse(await readStdin()));
+
+  if (response.ok) {
+    appendMetadataLogEvent({
+      event: "state_changed",
+      configured: response.state.configured,
+      enabled: response.state.enabled,
+      hotkeyRegistrationAllowed: response.state.hotkeyRegistrationAllowed
+    });
+  }
+
+  return response;
+}
+
+function settingsClearApiKeyCommandResponse(): SettingsCommandResponse {
+  const response = settingsClearApiKeyResponse();
+  appendMetadataLogEvent({
+    event: "state_changed",
+    configured: response.state.configured,
+    enabled: response.state.enabled,
+    hotkeyRegistrationAllowed: response.state.hotkeyRegistrationAllowed
+  });
+
+  return response;
 }
 
 function hotkeyRegistrationFinishedResponse(payload: unknown): Record<string, unknown> {
