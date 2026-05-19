@@ -7,6 +7,7 @@ import type { RewriteHotkeyConfig } from "../config/types.js";
 import type { MetadataLogEvent } from "./metadata-log.js";
 import { appendMetadataLogEvent } from "./metadata-log.js";
 import {
+  notificationForReplacementFlowCategory,
   ReplacementFlowController,
   planReplacementFlowRewrite,
   runReplacementFlow,
@@ -171,7 +172,7 @@ test("Screenshot Context degradation continues text-only and notifies without pr
   assert.equal(result.outcome, "succeeded");
   assert.equal(result.metadata.screenshotContextDegraded, true);
   assert.equal(result.metadata.screenshotContextDegradationCategory, "screenshot_capture_failed");
-  assert.equal(result.notificationTitle, "Rewrite degraded");
+  assert.equal(result.notificationTitle, "Screenshot Context unavailable");
   assert.equal(requestBody.includes(SCREENSHOT_CONTEXT.base64), false);
   assert.equal(JSON.stringify(result).includes(SCREENSHOT_CONTEXT.base64), false);
 });
@@ -238,6 +239,67 @@ test("Rewrite Timeout cancels Azure work and returns Safe Failure without a late
   assert.equal(plan.ok, false);
   assert.equal(plan.category, "azure_timeout");
   assert.equal("pasteText" in plan, false);
+});
+
+test("Replacement Flow notifications are specific and content-free for representative failures", () => {
+  const privateMarkers = ["raw selected text", "raw replacement text", SCREENSHOT_CONTEXT.base64, "secret-api-key"];
+  const notifications = [
+    notificationForReplacementFlowCategory("selected_text_empty"),
+    notificationForReplacementFlowCategory("azure_timeout"),
+    notificationForReplacementFlowCategory("azure_http_error"),
+    notificationForReplacementFlowCategory("config_invalid"),
+    notificationForReplacementFlowCategory("hotkey_registration_conflict")
+  ];
+
+  assert.deepEqual(
+    notifications.map((notification) => notification.title),
+    [
+      "No Selected Text captured",
+      "Rewrite timed out",
+      "Azure rewrite failed",
+      "Invalid Rewrite Hotkey settings",
+      "Rewrite Hotkey conflict"
+    ]
+  );
+
+  const serialised = JSON.stringify(notifications);
+  for (const marker of privateMarkers) {
+    assert.equal(serialised.includes(marker), false);
+  }
+});
+
+test("Disabled App blocks Replacement Flow before clipboard, screenshot, or Azure side effects", async () => {
+  const operations: string[] = [];
+  const native = createNativeFixture({
+    captureForegroundTarget: async () => {
+      operations.push("target");
+      return { id: "target-1" };
+    },
+    captureClipboardSnapshot: async () => {
+      operations.push("clipboard");
+      return { id: "snapshot-1" };
+    },
+    captureScreenshotContext: async () => {
+      operations.push("screenshot");
+      return SCREENSHOT_CONTEXT;
+    }
+  });
+
+  const result = await runReplacementFlow({
+    config: {
+      ...CONFIGURED_CONFIG,
+      enabled: false
+    },
+    native,
+    fetchFn: async () => {
+      operations.push("azure");
+      return new Response("{}");
+    }
+  });
+
+  assert.equal(result.outcome, "safe_failure");
+  assert.equal(result.category, "disabled_app");
+  assert.deepEqual(operations, []);
 });
 
 test("Replacement Flow restores and discards Replacement Text when Rewrite Target changes before paste", async () => {

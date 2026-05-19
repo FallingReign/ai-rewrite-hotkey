@@ -592,7 +592,7 @@ function optionalDegradedRewriteNotification(
 ): { notificationTitle?: string; notificationBody?: string } {
   return metadata.screenshotContextDegraded === true
     ? {
-        notificationTitle: "Rewrite degraded",
+        notificationTitle: "Screenshot Context unavailable",
         notificationBody: "Screenshot Context was unavailable, so the rewrite used Selected Text only."
       }
     : {};
@@ -604,7 +604,7 @@ function requiredRewriteNotification(
 ): { notificationTitle: string; notificationBody: string } {
   if (metadata.screenshotContextDegraded === true) {
     return {
-      notificationTitle: "Rewrite degraded",
+      notificationTitle: "Screenshot Context unavailable",
       notificationBody: "Screenshot Context was unavailable, so the rewrite used Selected Text only."
     };
   }
@@ -666,7 +666,7 @@ export function notificationForReplacementFlowCategory(category: MetadataCategor
     case "style_prompt_empty":
     case "style_prompt_too_large":
       return {
-        title: "Rewrite Hotkey settings issue",
+        title: "Invalid Rewrite Hotkey settings",
         body: "Check Settings. Original selection and clipboard were restored where possible."
       };
     case "selected_text_empty":
@@ -675,13 +675,21 @@ export function notificationForReplacementFlowCategory(category: MetadataCategor
         body: "Select usable text before pressing Rewrite Hotkey."
       };
     case "azure_timeout":
+      return {
+        title: "Rewrite timed out",
+        body: "Azure took too long to respond, so the rewrite was cancelled before paste."
+      };
     case "azure_network_error":
     case "azure_http_error":
     case "azure_malformed_response":
+      return {
+        title: "Azure rewrite failed",
+        body: "Azure did not return valid Replacement Text. Original selection and clipboard were restored where possible."
+      };
     case "vision_unsupported":
       return {
-        title: "Rewrite failed safely",
-        body: "Azure did not return valid Replacement Text. Original selection and clipboard were restored where possible."
+        title: "Screenshot Context unsupported",
+        body: "The configured Azure path did not accept Screenshot Context. Original selection and clipboard were restored where possible."
       };
     case "model_empty_output":
     case "model_explanatory_output":
@@ -692,14 +700,26 @@ export function notificationForReplacementFlowCategory(category: MetadataCategor
         body: "The model output was not valid Replacement Text. Original selection and clipboard were restored where possible."
       };
     case "selected_text_too_large":
-    case "payload_too_large":
       return {
-        title: "Rewrite too large",
+        title: "Selected Text too large",
         body: "The Selected Text was too large to rewrite safely. Original selection and clipboard were restored where possible."
       };
-    case "unexpected_error":
+    case "payload_too_large":
+      return {
+        title: "Rewrite request too large",
+        body: "The rewrite request was too large to send safely. Original selection and clipboard were restored where possible."
+      };
     case "hotkey_registration_conflict":
+      return {
+        title: "Rewrite Hotkey conflict",
+        body: "The configured hotkey could not be registered. The app will keep running."
+      };
     case "hotkey_invalid":
+      return {
+        title: "Invalid Rewrite Hotkey",
+        body: "Open Settings and choose a hotkey with at least one modifier and one key."
+      };
+    case "unexpected_error":
       return {
         title: "Rewrite failed safely",
         body: "The Replacement Flow stopped before paste. Original selection and clipboard were restored where possible."

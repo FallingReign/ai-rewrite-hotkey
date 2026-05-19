@@ -69,13 +69,25 @@ export interface MetadataLogEvent {
 
 export type MetadataLogger = (event: MetadataLogEvent) => void;
 
-export function appendMetadataLogEvent(event: MetadataLogEvent, logPath = getMetadataLogPath()): void {
+export const METADATA_LOG_MAX_BYTES = 256 * 1024;
+
+export function appendMetadataLogEvent(
+  event: MetadataLogEvent,
+  logPath = getMetadataLogPath(),
+  maxBytes = METADATA_LOG_MAX_BYTES
+): void {
   fs.mkdirSync(path.dirname(logPath), { recursive: true });
-  fs.appendFileSync(logPath, `${JSON.stringify(sanitiseMetadataLogEvent(event))}\n`, "utf8");
+  const line = `${JSON.stringify(sanitiseMetadataLogEvent(event))}\n`;
+  rotateMetadataLogIfNeeded(logPath, Buffer.byteLength(line, "utf8"), maxBytes);
+  fs.appendFileSync(logPath, line, "utf8");
 }
 
 export function getMetadataLogPath(): string {
   return path.join(getConfigDirectory(), "logs", "metadata.jsonl");
+}
+
+export function getRotatedMetadataLogPath(logPath = getMetadataLogPath()): string {
+  return `${logPath}.1`;
 }
 
 export function statusClassForHttpStatus(httpStatus: number | undefined): ProviderStatusClass | undefined {
@@ -84,6 +96,21 @@ export function statusClassForHttpStatus(httpStatus: number | undefined): Provid
   }
 
   return `${Math.floor(httpStatus / 100)}xx` as ProviderStatusClass;
+}
+
+function rotateMetadataLogIfNeeded(logPath: string, nextBytes: number, maxBytes: number): void {
+  if (maxBytes <= 0 || !fs.existsSync(logPath)) {
+    return;
+  }
+
+  const currentBytes = fs.statSync(logPath).size;
+  if (currentBytes + nextBytes <= maxBytes) {
+    return;
+  }
+
+  const rotatedPath = getRotatedMetadataLogPath(logPath);
+  fs.rmSync(rotatedPath, { force: true });
+  fs.renameSync(logPath, rotatedPath);
 }
 
 function sanitiseMetadataLogEvent(event: MetadataLogEvent): Record<string, unknown> {

@@ -8,7 +8,7 @@ import {
   type MetadataOutcome,
   type ProviderStatusClass
 } from "./metadata-log.js";
-import { planReplacementFlowRewrite } from "./replacement-flow.js";
+import { notificationForReplacementFlowCategory, planReplacementFlowRewrite } from "./replacement-flow.js";
 import { runSafeTestRewrite } from "./test-rewrite.js";
 import {
   type SettingsCommandResponse,
@@ -585,7 +585,7 @@ function selectedTextCaptureNotification(event: MetadataLogEvent): { title: stri
 function replacementFlowNotification(event: MetadataLogEvent): { title: string; body: string } {
   if (event.outcome === "succeeded" && event.screenshotContextDegraded === true) {
     return {
-      title: "Rewrite degraded",
+      title: "Screenshot Context unavailable",
       body: "Screenshot Context was unavailable, so the rewrite used Selected Text only."
     };
   }
@@ -597,72 +597,14 @@ function replacementFlowNotification(event: MetadataLogEvent): { title: string; 
     };
   }
 
-  switch (event.category) {
-    case "disabled_app":
-      return {
-        title: "Rewrite Hotkey disabled",
-        body: "The in-flight rewrite was cancelled. Original selection and clipboard were restored where possible."
-      };
-    case "selected_text_empty":
-      return {
-        title: "No Selected Text captured",
-        body: "Select usable text before pressing Rewrite Hotkey."
-      };
-    case "rewrite_target_changed":
-      return {
-        title: "Rewrite target changed",
-        body: "The foreground app changed before paste, so the rewrite was discarded and the clipboard was restored where possible."
-      };
-    case "clipboard_snapshot_failed":
-      return {
-        title: "Rewrite failed safely",
-        body: "The clipboard could not be snapshotted, so copy was not sent."
-      };
-    case "clipboard_restore_failed":
-      return {
-        title: "Clipboard restore failed",
-        body: "The Clipboard Snapshot could not be restored."
-      };
-    case "clipboard_write_failed":
-      return {
-        title: "Rewrite failed safely",
-        body: "Replacement Text could not be placed on the clipboard. Original selection and clipboard were restored where possible."
-      };
-    case "paste_failed":
-      return {
-        title: "Rewrite failed safely",
-        body: "Replacement Text could not be pasted. Original selection and clipboard were restored where possible."
-      };
-    case "config_invalid":
-    case "style_prompt_empty":
-    case "style_prompt_too_large":
-      return {
-        title: "Rewrite Hotkey settings issue",
-        body: "Check Settings. Original selection and clipboard were restored where possible."
-      };
-    case "azure_timeout":
-    case "azure_network_error":
-    case "azure_http_error":
-    case "azure_malformed_response":
-    case "vision_unsupported":
-      return {
-        title: "Rewrite failed safely",
-        body: "Azure did not return valid Replacement Text. Original selection and clipboard were restored where possible."
-      };
-    case "model_empty_output":
-    case "model_explanatory_output":
-    case "model_metadata_output":
-    case "model_ambiguous_output":
-      return {
-        title: "Rewrite failed safely",
-        body: "The model output was not valid Replacement Text. Original selection and clipboard were restored where possible."
-      };
-    default:
-      return {
-        title: "Rewrite failed safely",
-        body: "The Replacement Flow stopped before paste. Original selection and clipboard were restored where possible."
-      };
+  if (event.category !== undefined) {
+    return notificationForReplacementFlowCategory(event.category);
   }
+
+  return {
+    title: "Rewrite failed safely",
+    body: "The Replacement Flow stopped before paste. Original selection and clipboard were restored where possible."
+  };
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

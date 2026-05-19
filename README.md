@@ -47,6 +47,8 @@ The API key is stored only in the per-user local config file for V0. Do not copy
 
 The tray app also includes a minimal **Open Settings** window for editing the local config. The UI leaves the API key field blank, shows only whether a stored key exists, and includes a **Clear API key** action. Saved settings are validated before they replace the local config; changing the Rewrite Hotkey re-registers it, and `launchOnStartup` controls the current Windows user's startup registration.
 
+Metadata logs are written under the same per-user app data directory at `logs\metadata.jsonl`. They keep only content-free categories, status classes, timings, and length metadata, and rotate to `metadata.jsonl.1` before the active log exceeds 256 KB.
+
 ## Live Test Rewrite
 
 Run a text-only **Test Rewrite** against the configured Azure OpenAI resource:
