@@ -8,6 +8,7 @@
     "config:open": "tsx src/config/cli.ts open",
     "config:path": "tsx src/config/cli.ts path",
     "config:status": "tsx src/config/cli.ts status",
+    "rewrite:test": "tsx src/rewrite/cli.ts",
     "test": "node --test --import tsx \"src/**/*.test.ts\"",
     "typecheck": "tsc --noEmit"
   },
