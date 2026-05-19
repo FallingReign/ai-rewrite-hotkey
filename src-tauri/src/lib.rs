@@ -3,7 +3,7 @@ use std::{
     io::Write,
     path::PathBuf,
     process::{Command, Stdio},
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
     thread,
     time::Duration,
 };
@@ -32,11 +32,14 @@ use windows_sys::Win32::{
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
+const IN_PROGRESS_NOTIFICATION_DELAY: Duration = Duration::from_secs(10);
+
 #[derive(Default)]
 struct HotkeyRuntimeState {
     in_flight_capture: AtomicBool,
     cancel_requested: AtomicBool,
     quit_after_cancel: AtomicBool,
+    rewrite_generation: AtomicU64,
 }
 
 #[derive(Clone, Copy)]
@@ -290,7 +293,12 @@ fn handle_rewrite_hotkey(app: AppHandle) {
     }
     state.cancel_requested.store(false, Ordering::SeqCst);
     state.quit_after_cancel.store(false, Ordering::SeqCst);
+    let generation = state
+        .rewrite_generation
+        .fetch_add(1, Ordering::SeqCst)
+        .wrapping_add(1);
     set_tray_tooltip(&app, "Rewrite Hotkey - Rewriting...");
+    schedule_in_progress_notification(app.clone(), generation);
 
     thread::spawn(move || {
         dev_log("flow: started");
@@ -415,6 +423,25 @@ fn handle_rewrite_hotkey(app: AppHandle) {
         }
 
         finish_hotkey_thread(&app);
+    });
+}
+
+fn schedule_in_progress_notification(app: AppHandle, generation: u64) {
+    thread::spawn(move || {
+        thread::sleep(IN_PROGRESS_NOTIFICATION_DELAY);
+        let state = app.state::<HotkeyRuntimeState>();
+        let same_rewrite = state.rewrite_generation.load(Ordering::SeqCst) == generation;
+        let still_running = state.in_flight_capture.load(Ordering::SeqCst);
+        let cancelled = state.cancel_requested.load(Ordering::SeqCst);
+
+        if same_rewrite && still_running && !cancelled {
+            dev_log("notify: rewrite still in progress after 10s");
+            notify(
+                &app,
+                "Rewrite still running",
+                "Azure is still working. Keep the original app focused so Rewrite Hotkey can paste safely.",
+            );
+        }
     });
 }
 

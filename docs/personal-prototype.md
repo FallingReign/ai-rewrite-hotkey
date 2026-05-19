@@ -81,8 +81,9 @@ Tray actions:
 1. Select explicit text in any app.
 2. Press the configured Rewrite Hotkey, default `Ctrl+Alt+Space`.
 3. Leave focus in the same app while the rewrite runs.
-4. If successful, the selected text is replaced silently.
-5. If the rewrite fails, the original selection remains untouched where possible and a content-free notification explains the outcome.
+4. If the rewrite is still running after 10 seconds, a content-free toast reminds you to keep the original app focused.
+5. If successful, the selected text is replaced silently.
+6. If the rewrite fails, the original selection remains untouched where possible and a content-free notification explains the outcome.
 
 ## Test Rewrite
 
